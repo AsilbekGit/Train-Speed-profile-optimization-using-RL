@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import os
 import config
 from utils import discretize_state
+import time
 
 class CMAnalyzer:
     def __init__(self, env):
@@ -23,11 +24,15 @@ class CMAnalyzer:
 
     def run(self, episodes=2000):
         print(f"Starting CM Analysis for {episodes} episodes...")
+        start_time = time.time()
         
         for ep in range(1, episodes + 1):
             self.env.reset()
             state = self.env._get_state()
             s_idx, v_idx = discretize_state(state)
+            
+            total_reward = 0.0  # Track score for this episode
+            steps = 0
             
             # Initial Action
             if np.random.rand() < self.epsilon:
@@ -38,6 +43,9 @@ class CMAnalyzer:
             while True:
                 next_state_raw, reward, done, _ = self.env.step(action)
                 ns_idx, nv_idx = discretize_state(next_state_raw)
+                
+                total_reward += reward
+                steps += 1
                 
                 # Next Action (SARSA Logic)
                 if np.random.rand() < self.epsilon:
@@ -81,13 +89,26 @@ class CMAnalyzer:
                 self.cm_history.append(cm)
             else:
                 self.cm_history.append(1.0)
-                
-            if ep % 100 == 0:
-                print(f"Episode {ep}/{episodes} | Delta: {diff:.4f} | CM: {self.cm_history[-1]:.4f}")
+                cm = 1.0
+
+            # --- PRINT STATUS EVERY EPISODE ---
+            # Calculates estimated time remaining
+            elapsed = time.time() - start_time
+            avg_time_per_ep = elapsed / ep
+            remaining = (episodes - ep) * avg_time_per_ep
+            rem_str = time.strftime("%H:%M:%S", time.gmtime(remaining))
+
+            # Dynamic printing
+            print(f"Ep {ep:04d}/{episodes} | "
+                  f"Reward: {total_reward:9.2f} | "
+                  f"Delta: {diff:8.4f} | "
+                  f"CM: {cm:.4f} | "
+                  f"ETA: {rem_str}")
 
         self.save_plot()
 
     def save_plot(self):
+        print("\nSaving results...")
         plt.figure(figsize=(10, 6))
         plt.plot(self.cm_history)
         plt.title("Convergence Measurement (CM) Analysis")
