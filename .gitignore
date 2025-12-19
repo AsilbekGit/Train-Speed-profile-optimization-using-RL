@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# Environments
+sim/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Logs / outputs
+*.log
+runs/
+wandb/
+tensorboard/
+checkpoints/
+outputs/
+results/
+
+# Large / raw data only
+data/raw/
+data/processed/
+*.zip
+
+# Models
+*.pt
+*.pth
+*.ckpt
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# Environments
+sim/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Logs / outputs
+*.log
+runs/
+wandb/
+tensorboard/
+checkpoints/
+outputs/
+results/
+
+# Data (adjust as needed)
+data/
+*.csv
+*.dat
+*.zip
+*.pt
+*.pth
+*.ckpt
+
+
