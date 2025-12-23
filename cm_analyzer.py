@@ -95,13 +95,14 @@ class CMAnalyzer:
                     print(f"    Cumulative reward: {total_reward:.2f}")
                 
                 # Stuck detection
-                if abs(current_position - prev_position) < 0.001:
+                if abs(current_position - prev_position) < config.POSITION_EPSILON:
                     stuck_counter += 1
                     if stuck_counter >= config.STUCK_THRESHOLD:
                         print(f"\n  ⚠️  STUCK DETECTED at step {steps}")
                         print(f"     Velocity: {self.env.v:.3f}m/s")
                         print(f"     Position: seg={s_idx}, pos_in_seg={self.env.pos_in_seg:.2f}m")
-                        print(f"     No movement for {stuck_counter} consecutive steps")
+                        print(f"     No significant movement for {stuck_counter} consecutive steps")
+                        print(f"     Position change: {abs(current_position - prev_position):.6f}m")
                         print(f"     Ending episode early...\n")
                         done = True
                 else:
@@ -217,35 +218,42 @@ class CMAnalyzer:
         """
         print("\n📊 Generating CM plot...")
         
+        # Determine y-axis limits based on data
+        cm_array = np.array(self.cm_history)
+        cm_95percentile = np.percentile(cm_array, 95)  # Ignore outliers
+        y_max = min(max(cm_95percentile * 1.2, 3.0), 10.0)  # Cap at 10 for readability
+        
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
         
         # Plot 1: CM over episodes
-        ax1.plot(self.cm_history, linewidth=1.5, color='blue', alpha=0.7, label='Your CM values')
+        ax1.plot(self.cm_history, linewidth=1.0, color='blue', alpha=0.7, label='Your CM values')
         
         # Add reference line from paper (for comparison only)
         ax1.axhline(y=config.PHI_REFERENCE, color='red', linestyle='--', 
                    linewidth=2, label=f'Paper φ = {config.PHI_REFERENCE} (reference only)')
         
         ax1.set_title("Convergence Measurement (CM) Analysis\n"
-                     "Find YOUR optimal φ threshold by analyzing where CM stabilizes", 
+                     "CM should DECREASE and stabilize over episodes (see paper Fig. 5)", 
                      fontsize=14, fontweight='bold')
         ax1.set_xlabel("Episodes", fontsize=12)
         ax1.set_ylabel("CM Ratio (ΔQ_i / ΔQ_{i-1})", fontsize=12)
+        ax1.set_ylim([0, y_max])
         ax1.legend(fontsize=10)
         ax1.grid(True, alpha=0.3)
         
         # Add text annotation
         ax1.text(0.02, 0.98, 
-                'Note: The red line shows the paper\'s φ value.\n'
-                'YOUR φ should be determined from this plot.',
+                f'Expected pattern: CM starts high (1-3), then DECREASES to stable value.\n'
+                f'Your CM max: {np.max(cm_array):.2f}, median: {np.median(cm_array):.4f}\n'
+                f'Paper\'s φ = {config.PHI_REFERENCE} (shown for comparison)',
                 transform=ax1.transAxes, fontsize=9,
                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
         # Plot 2: Delta over episodes (log scale for better visualization)
-        ax2.plot(self.delta_history, linewidth=1.5, color='green', alpha=0.7)
+        ax2.plot(self.delta_history, linewidth=1.0, color='green', alpha=0.7)
         ax2.set_xlabel("Episodes", fontsize=12)
         ax2.set_ylabel("Delta (ΔQ_i)", fontsize=12)
-        ax2.set_title("Q-table Change per Episode", fontsize=12)
+        ax2.set_title("Q-table Change per Episode (should decrease as learning progresses)", fontsize=12)
         ax2.set_yscale('log')
         ax2.grid(True, alpha=0.3)
         
@@ -258,32 +266,47 @@ class CMAnalyzer:
         
         print(f"✓ Plot saved to: {save_path}")
         
-        # Also save a zoomed version for better detail
+        # Zoomed version focusing on convergence region
         fig, ax = plt.subplots(1, 1, figsize=(14, 6))
-        ax.plot(self.cm_history, linewidth=1.5, color='blue', alpha=0.7, label='Your CM values')
+        ax.plot(self.cm_history, linewidth=1.0, color='blue', alpha=0.7, label='Your CM values')
         ax.axhline(y=config.PHI_REFERENCE, color='red', linestyle='--', 
                   linewidth=2, label=f'Paper φ = {config.PHI_REFERENCE} (reference)')
-        ax.set_ylim([0, 1.5])  # Zoom to 0-1.5 range
-        ax.set_title("CM Analysis (Zoomed: 0-1.5 range)\nLook for stable convergence region", fontsize=14)
+        
+        # Adaptive zoom based on data
+        zoom_max = min(np.percentile(cm_array, 90), 2.0)
+        ax.set_ylim([0, zoom_max])
+        
+        ax.set_title(f"CM Analysis (Zoomed: 0-{zoom_max:.1f} range)\n"
+                    "Look for stable convergence region in later episodes", fontsize=14)
         ax.set_xlabel("Episodes", fontsize=12)
         ax.set_ylabel("CM Ratio", fontsize=12)
         ax.legend()
         ax.grid(True, alpha=0.3)
         
-        # Add horizontal lines at common thresholds for reference
-        for threshold in [0.02, 0.04, 0.06, 0.08, 0.10]:
-            ax.axhline(y=threshold, color='gray', linestyle=':', linewidth=0.5, alpha=0.5)
-            ax.text(len(self.cm_history)*0.98, threshold, f'{threshold:.2f}', 
-                   fontsize=8, va='center', ha='right', color='gray')
+        # Add reference lines
+        for threshold in [0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20]:
+            if threshold < zoom_max:
+                ax.axhline(y=threshold, color='gray', linestyle=':', linewidth=0.5, alpha=0.5)
+                ax.text(len(self.cm_history)*0.98, threshold, f'{threshold:.2f}', 
+                       fontsize=8, va='center', ha='right', color='gray')
         
         zoom_path = os.path.join(config.OUTPUT_DIR, "cm_plot_zoomed.png")
         plt.savefig(zoom_path, dpi=300, bbox_inches='tight')
         plt.close()
         
         print(f"✓ Zoomed plot saved to: {zoom_path}")
-        print(f"\n💡 NEXT STEP: Analyze the plots to find YOUR optimal φ value")
-        print(f"   Look for the region where CM stabilizes/converges.")
-        print(f"   This will be different from the paper's φ = {config.PHI_REFERENCE}")
+        print(f"\n💡 ANALYSIS:")
+        print(f"   Paper's Fig. 5 shows CM decreasing from ~2.0 to ~0.04-0.10")
+        print(f"   Your CM: max={np.max(cm_array):.2f}, median={np.median(cm_array):.4f}")
+        
+        if np.median(cm_array) > 0.5:
+            print(f"   ⚠️  WARNING: CM is NOT converging properly!")
+            print(f"   Expected: CM should decrease over episodes")
+            print(f"   Check: Are episodes completing successfully?")
+        else:
+            print(f"   ✓ CM appears to be converging")
+            print(f"   Look for the stable region in later episodes")
+
     
     def save_data(self):
         """

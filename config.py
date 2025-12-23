@@ -3,7 +3,7 @@ import torch
 
 # --- System Settings ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-OUTPUT_DIR = "results"
+OUTPUT_DIR = "results_cm"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # --- File Paths ---
@@ -30,7 +30,9 @@ VEL_BIN_SIZE = 0.5        # Discretization for Q-Table (m/s)
 
 # --- Episode Control ---
 MAX_STEPS_PER_EPISODE = 10000  # Maximum steps per episode to prevent infinite loops
-STUCK_THRESHOLD = 50           # Number of consecutive steps with no movement to detect stuck
+STUCK_THRESHOLD = 100          # Number of consecutive steps with no movement to detect stuck
+                               # Increased from 50 to 100 - train might coast/brake temporarily
+POSITION_EPSILON = 0.01        # Minimum position change (meters) to consider as movement
 
 # --- Convergence Measurement (CM Analysis) ---
 # NOTE: φ threshold is NOT fixed! It depends on your specific route data.
@@ -46,7 +48,7 @@ PHI_REFERENCE = 0.04           # Paper's φ value (for comparison only)
 # - This will be YOUR φ value to use in Q-SARSA later
 
 # --- Debug and Logging ---
-DEBUG_MODE = True             # Set to True for detailed debugging info
+DEBUG_MODE = False             # Set to True for detailed debugging info
 PRINT_EVERY_STEP = False       # Set to True to print every single step (WARNING: very verbose!)
                                # Recommended: False for normal runs, True only for debugging first few episodes
 

@@ -27,7 +27,13 @@ class TrainEnv:
         """Reset environment to initial state"""
         self.seg_idx = 0
         self.pos_in_seg = 0.0
-        self.v = 0.0  # Start from rest
+        
+        # CRITICAL FIX: Start with initial velocity (as in paper Section 3.4)
+        # "The train moves to location x_start with maximum acceleration. 
+        # At point x_start the train has speed v_start."
+        # Starting from complete rest (v=0) causes the train to get stuck
+        self.v = 10.0  # Start at 10 m/s (~36 km/h) - reasonable initial speed
+        
         self.t = 0.0
         self.energy_kwh = 0.0
         self.done = False
