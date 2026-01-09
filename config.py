@@ -29,7 +29,7 @@ DT = 1.0                  # Time step (seconds)
 VEL_BIN_SIZE = 0.5        # Discretization for Q-Table (m/s)
 
 # --- Episode Control ---
-MAX_STEPS_PER_EPISODE = 10000  # Maximum steps per episode to prevent infinite loops
+MAX_STEPS_PER_EPISODE = 20000  # Maximum steps per episode to prevent infinite loops
 STUCK_THRESHOLD = 100          # Number of consecutive steps with no movement to detect stuck
                                # Increased from 50 to 100 - train might coast/brake temporarily
 POSITION_EPSILON = 0.01        # Minimum position change (meters) to consider as movement

@@ -287,6 +287,8 @@ class DeepQNetwork:
         
         self.save_results()
     
+    # dqn.py - Fix save_results()
+
     def save_results(self):
         """Save training results"""
         print("\n💾 Saving Deep-Q results...")
@@ -294,15 +296,18 @@ class DeepQNetwork:
         output_dir = os.path.join(config.OUTPUT_DIR, "deep_q")
         os.makedirs(output_dir, exist_ok=True)
         
-        # Save network weights
+        # FIXED: Save weights as separate arrays
+        weights_dict = {f'w{i}': w for i, w in enumerate(self.weights)}
+        biases_dict = {f'b{i}': b for i, b in enumerate(self.biases)}
+        
         np.savez(os.path.join(output_dir, "deep_q_weights.npz"),
-                 weights=[w for w in self.weights],
-                 biases=[b for b in self.biases],
-                 cm_history=np.array(self.cm_history),
-                 delta_history=np.array(self.delta_history),
-                 reward_history=np.array(self.reward_history),
-                 energy_history=np.array(self.energy_history),
-                 time_history=np.array(self.time_history))
+                **weights_dict,  # Unpack dictionary
+                **biases_dict,
+                cm_history=np.array(self.cm_history),
+                delta_history=np.array(self.delta_history),
+                reward_history=np.array(self.reward_history),
+                energy_history=np.array(self.energy_history),
+                time_history=np.array(self.time_history))
         
         # Plot results
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))

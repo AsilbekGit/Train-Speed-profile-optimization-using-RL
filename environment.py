@@ -138,32 +138,32 @@ class TrainEnv:
                 self.pos_in_seg = 0.0
                 break
 
-        # Calculate Reward (as per your design)
-        reward = 0.0
-        
-        # Energy penalty (higher weight to encourage efficiency)
-        reward -= e_kwh_step * 100.0
-        
-        # Time penalty (encourage faster travel)
-        reward -= 0.1
-        
-        # Speed limit violation penalty
-        if self.v > limit:
-            violation = self.v - limit
-            reward -= 50.0 + violation * 10.0
-        
-        # Success bonus
-        if self.done:
-            # Large bonus for completing the route
-            reward += 1000.0
-            
-            # Additional bonus for efficiency
-            # Average energy should be around 22 kWh per segment
-            expected_energy = self.n_segments * 0.022  # 22 kWh/segment
-            if self.energy_kwh < expected_energy:
-                # Bonus for using less energy than expected
-                reward += (expected_energy - self.energy_kwh) * 10.0
+        # environment.py - Modified reward function
 
+        # Calculate reward
+        reward = 0.0
+
+        # Progress reward (NEW!)
+        progress_reward = (self.position_km - old_position_km) * 100  # Reward forward movement!
+
+        # Energy penalty (REDUCED)
+        energy_penalty = -e_kwh_step * 50.0  # Was 100, now 50
+
+        # Time penalty (REDUCED)
+        time_penalty = -0.05  # Was 0.1, now 0.05
+
+        reward = progress_reward + energy_penalty + time_penalty
+
+        # Speed limit violation (keep strong)
+        if self.v > limit:
+            reward -= 50.0 + (self.v - limit) * 10
+
+        # Success bonus (keep large)
+        if self.done:
+            reward += 1000.0
+            # Bonus for time efficiency
+            if self.t < config.MAX_STEPS_PER_EPISODE * 0.8:
+                reward += 500.0
         info = {
             'segment': self.seg_idx,
             'velocity': self.v,

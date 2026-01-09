@@ -40,6 +40,8 @@ class CMAnalyzer:
         
         start_time = time.time()
         
+        success_count = 0
+
         for ep in range(1, episodes + 1):
             episode_start = time.time()
             
@@ -177,6 +179,13 @@ class CMAnalyzer:
             remaining = (episodes - ep) * avg_time_per_ep
             rem_str = time.strftime("%H:%M:%S", time.gmtime(remaining))
             
+            # Track success
+            if self.env.seg_idx >= self.env.n_segments - 1:
+                success_count += 1
+            
+            success_rate = (success_count / ep) * 100
+
+
             # --- PRINT EPISODE SUMMARY ---
             success_marker = "✓" if self.env.seg_idx >= self.env.n_segments - 1 else "✗"
             print(f"\n{success_marker} Ep {ep:04d}/{episodes} | "
