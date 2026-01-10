@@ -15,7 +15,7 @@ def main():
     
     # 4. Run CM Analysis
     analyzer = CMAnalyzer(env)
-    analyzer.run(episodes=10)
+    analyzer.run(episodes=25000)
     
     print("\nProcess Complete.")
     print("Please check the 'results_cm' folder for the plot.")
