@@ -56,6 +56,9 @@ class TrainEnv:
         if self.done:
             return self._get_state(), 0, True, {}
 
+        # Calculate OLD position (before step) in km
+        old_position_km = (self.seg_idx * config.DX + self.pos_in_seg) / 1000.0
+
         # Get current segment data
         grade = self.grades[self.seg_idx]
         curve = self.curves[self.seg_idx]
@@ -138,7 +141,8 @@ class TrainEnv:
                 self.pos_in_seg = 0.0
                 break
 
-        # environment.py - Modified reward function
+        # Calculate NEW position (after step) in km
+        self.position_km = (self.seg_idx * config.DX + self.pos_in_seg) / 1000.0
 
         # Calculate reward
         reward = 0.0
@@ -164,6 +168,7 @@ class TrainEnv:
             # Bonus for time efficiency
             if self.t < config.MAX_STEPS_PER_EPISODE * 0.8:
                 reward += 500.0
+        
         info = {
             'segment': self.seg_idx,
             'velocity': self.v,
