@@ -13,11 +13,12 @@ class CMAnalyzer:
         self.q_curr = np.zeros(self.q_shape)
         self.q_prev = np.zeros(self.q_shape)
         
-        # History
-        self.delta_history = []
-        self.cm_history = []
+        # History tracking
+        self.delta_history = []      # ΔQi values
+        self.cm_history = []          # ΔQi/ΔQi-1 (ratio)
+        self.ln_cm_history = []       # ln(ΔQi/ΔQi-1) - FOR PLOTTING like Fig 5
         
-        # Hyperparams
+        # Hyperparams (using SARSA for CM analysis - see paper Section 3.4)
         self.alpha = 0.1
         self.gamma = 0.95
         self.epsilon = 0.15
@@ -26,22 +27,64 @@ class CMAnalyzer:
         self.debug_mode = config.DEBUG_MODE
         self.print_every_step = config.PRINT_EVERY_STEP
         
-    def run(self, episodes=2000):
+    def detect_local_optimum_threshold(self):
+        """
+        Automatically detect YOUR local optimum threshold from ln(CM) data
+        
+        Paper methodology (Section 3.4):
+        "the algorithm starts to fail to local optimums as the ln(ΔQi/ΔQi−1) 
+         goes below −3.21"
+        
+        We detect this by:
+        1. Taking last 20% of episodes (stable convergence region)
+        2. Calculating median ln(CM) in that region
+        3. This is where YOUR algorithm starts failing to local optimum
+        
+        Returns:
+            ln_threshold: YOUR ln(CM) threshold value
+            phi_threshold: Corresponding φ = e^(ln_threshold)
+        """
+        ln_cm_array = np.array(self.ln_cm_history)
+        
+        # Take last 20% of episodes (stable region)
+        stable_start = int(len(ln_cm_array) * 0.8)
+        stable_region = ln_cm_array[stable_start:]
+        
+        if len(stable_region) < 10:
+            # Not enough data, use all data
+            stable_region = ln_cm_array
+        
+        # Calculate threshold as median of stable region
+        ln_threshold = np.median(stable_region)
+        
+        # Convert to φ ratio
+        phi_threshold = np.exp(ln_threshold)
+        
+        return ln_threshold, phi_threshold
+    
+    def run(self, episodes=25000):  # Paper used 25,000 scenarios
+        """
+        Run CM Analysis using SARSA algorithm (Equation 27)
+        Purpose: Find YOUR φ threshold where local optimum occurs
+        
+        Paper methodology (Section 3.4):
+        - Run SARSA for 25,000 scenarios
+        - Calculate ln(ΔQi/ΔQi-1) for each episode
+        - Find where ln(CM) stabilizes → that's YOUR threshold
+        """
         print(f"\n{'='*70}")
-        print(f"STARTING CM ANALYSIS")
+        print(f"CM ANALYSIS - Finding YOUR φ Threshold")
         print(f"{'='*70}")
+        print(f"Methodology: Paper Section 3.4, Figure 5")
+        print(f"Algorithm: SARSA (Equation 27)")
         print(f"Total Episodes: {episodes}")
-        print(f"Max Steps per Episode: {config.MAX_STEPS_PER_EPISODE}")
-        print(f"Segments: {self.env.n_segments}")
-        print(f"Q-table shape: {self.q_shape}")
-        print(f"Debug Mode: {self.debug_mode}")
-        print(f"Step-by-step printing: {self.print_every_step}")
+        print(f"Expected: ln(CM) decreases from ~0 to stable negative value")
+        print(f"YOUR threshold will be detected automatically")
         print(f"{'='*70}\n")
         
         start_time = time.time()
-        
         success_count = 0
-
+        
         for ep in range(1, episodes + 1):
             episode_start = time.time()
             
@@ -55,20 +98,20 @@ class CMAnalyzer:
             stuck_counter = 0
             prev_position = 0.0
             
-            # Initial Action
+            # Initial Action (ε-greedy)
             if np.random.rand() < self.epsilon:
                 action = np.random.randint(4)
             else:
                 action = np.argmax(self.q_curr[s_idx, v_idx])
             
-            if self.debug_mode:
+            if self.debug_mode and ep <= 2:  # Debug only first 2 episodes
                 print(f"\n{'='*70}")
                 print(f"EPISODE {ep} START")
                 print(f"{'='*70}")
                 print(f"Initial State: seg={s_idx}, v={self.env.v:.2f}m/s")
                 print(f"Initial Action: {config.ACTION_NAMES[action]}")
             
-            # Episode loop with max steps
+            # Episode loop
             while steps < config.MAX_STEPS_PER_EPISODE:
                 current_position = self.env.seg_idx + (self.env.pos_in_seg / config.DX)
                 
@@ -80,45 +123,33 @@ class CMAnalyzer:
                 steps += 1
                 
                 # Print step details if enabled
-                if self.print_every_step:
+                if self.print_every_step and ep <= 2:
                     print(f"  Step {steps:4d} | "
                           f"Seg: {s_idx:3d} | "
                           f"V: {self.env.v:6.2f}m/s | "
                           f"Action: {config.ACTION_NAMES[action]:8s} | "
-                          f"Reward: {reward:8.2f} | "
-                          f"Pos: {current_position:6.2f}")
-                
-                # Debug detailed info
-                if self.debug_mode and steps % 100 == 0:
-                    print(f"\n  [DEBUG Step {steps}]")
-                    print(f"    Position in segment: {self.env.pos_in_seg:.2f}m")
-                    print(f"    Total time: {self.env.t:.1f}s")
-                    print(f"    Total energy: {self.env.energy_kwh:.3f}kWh")
-                    print(f"    Cumulative reward: {total_reward:.2f}")
+                          f"Reward: {reward:8.2f}")
                 
                 # Stuck detection
                 if abs(current_position - prev_position) < config.POSITION_EPSILON:
                     stuck_counter += 1
                     if stuck_counter >= config.STUCK_THRESHOLD:
-                        print(f"\n  ⚠️  STUCK DETECTED at step {steps}")
-                        print(f"     Velocity: {self.env.v:.3f}m/s")
-                        print(f"     Position: seg={s_idx}, pos_in_seg={self.env.pos_in_seg:.2f}m")
-                        print(f"     No significant movement for {stuck_counter} consecutive steps")
-                        print(f"     Position change: {abs(current_position - prev_position):.6f}m")
-                        print(f"     Ending episode early...\n")
+                        if self.debug_mode:
+                            print(f"\n  ⚠️ STUCK at step {steps}, ending episode")
                         done = True
                 else:
                     stuck_counter = 0
                 
                 prev_position = current_position
                 
-                # Next Action (SARSA Logic)
+                # Next Action (SARSA-style: ε-greedy)
                 if np.random.rand() < self.epsilon:
                     next_action = np.random.randint(4)
                 else:
                     next_action = np.argmax(self.q_curr[ns_idx, nv_idx])
                 
-                # Update Q (SARSA update rule)
+                # SARSA Update (Equation 27 from paper)
+                # Q(s,a) ← Q(s,a) + η[r + γQ(s',a') - Q(s,a)]
                 target = reward + self.gamma * self.q_curr[ns_idx, nv_idx, next_action]
                 if done:
                     target = reward
@@ -126,281 +157,303 @@ class CMAnalyzer:
                 old_q = self.q_curr[s_idx, v_idx, action]
                 self.q_curr[s_idx, v_idx, action] += self.alpha * (target - old_q)
                 
-                if self.debug_mode and abs(self.q_curr[s_idx, v_idx, action] - old_q) > 0.01:
-                    print(f"    Q-value updated: {old_q:.4f} -> {self.q_curr[s_idx, v_idx, action]:.4f}")
-                
                 # Move to next state
                 s_idx, v_idx = ns_idx, nv_idx
                 action = next_action
                 
                 if done:
-                    if self.debug_mode or self.print_every_step:
-                        print(f"\n  ✓ Episode completed at step {steps}")
-                        print(f"    Final position: seg={self.env.seg_idx}")
-                        print(f"    Success: {'YES' if self.env.seg_idx >= self.env.n_segments - 1 else 'NO'}")
                     break
-            
-            # Check if max steps reached
-            if steps >= config.MAX_STEPS_PER_EPISODE and not done:
-                print(f"\n  ⏱️  MAX STEPS REACHED ({config.MAX_STEPS_PER_EPISODE})")
-                print(f"     Episode terminated early")
-                print(f"     Final position: seg={self.env.seg_idx}/{self.env.n_segments}")
             
             episode_time = time.time() - episode_start
             
-            # --- Calculate Delta and CM (as per paper) ---
-            # Delta_i: Sum of absolute differences between Q_curr and Q_prev
-            diff = np.sum(np.abs(self.q_curr - self.q_prev))
-            self.delta_history.append(diff)
+            # --- Calculate ΔQi (sum of absolute Q-table changes) ---
+            delta_i = np.sum(np.abs(self.q_curr - self.q_prev))
+            self.delta_history.append(delta_i)
             
-            # Update Previous Q for next iteration
+            # Update previous Q for next iteration
             self.q_prev = self.q_curr.copy()
             
-            # Calculate CM: ΔQ_i / ΔQ_{i-1} (Equation 28, 29 from paper)
+            # --- Calculate CM: ΔQi / ΔQi-1 (Equations 28, 29) ---
             if len(self.delta_history) >= 2:
                 delta_n = self.delta_history[-1]
                 delta_n_minus_1 = self.delta_history[-2]
                 
                 if delta_n_minus_1 > 1e-9:
-                    cm = delta_n / delta_n_minus_1
+                    cm_ratio = delta_n / delta_n_minus_1
                 else:
-                    cm = 0.0
+                    cm_ratio = 1.0
                 
-                # Cap for plotting safety (values > 3 are outliers)
-                cm = min(cm, 3.0)
-                self.cm_history.append(cm)
+                # Store ratio (for actual Q-SARSA use later)
+                self.cm_history.append(cm_ratio)
+                
+                # --- Calculate ln(ΔQi/ΔQi-1) for plotting (Figure 5) ---
+                if cm_ratio > 1e-9:
+                    ln_cm = np.log(cm_ratio)  # Natural logarithm
+                else:
+                    ln_cm = -10.0  # Very small ratio → large negative ln
+                
+                self.ln_cm_history.append(ln_cm)
             else:
-                cm = 1.0
-                self.cm_history.append(cm)
+                # First episode: no previous delta to compare
+                self.cm_history.append(1.0)
+                self.ln_cm_history.append(0.0)
             
-            # --- Calculate ETA ---
-            elapsed = time.time() - start_time
-            avg_time_per_ep = elapsed / ep
-            remaining = (episodes - ep) * avg_time_per_ep
-            rem_str = time.strftime("%H:%M:%S", time.gmtime(remaining))
-            
-            # Track success
+            # Track success rate
             if self.env.seg_idx >= self.env.n_segments - 1:
                 success_count += 1
             
-            success_rate = (success_count / ep) * 100
-
-
-            # --- PRINT EPISODE SUMMARY ---
-            success_marker = "✓" if self.env.seg_idx >= self.env.n_segments - 1 else "✗"
-            print(f"\n{success_marker} Ep {ep:04d}/{episodes} | "
-                  f"Steps: {steps:5d} | "
-                  f"Reward: {total_reward:9.2f} | "
-                  f"Delta: {diff:10.4f} | "
-                  f"CM: {cm:6.4f} | "
-                  f"Time: {episode_time:5.1f}s | "
-                  f"ETA: {rem_str}")
-            
-            if self.debug_mode:
-                print(f"  Final Stats:")
-                print(f"    Segments completed: {self.env.seg_idx}/{self.env.n_segments}")
-                print(f"    Final velocity: {self.env.v:.2f}m/s")
-                print(f"    Total time: {self.env.t:.1f}s")
-                print(f"    Total energy: {self.env.energy_kwh:.3f}kWh")
-                print(f"  Q-table Stats:")
-                print(f"    Non-zero Q-values: {np.count_nonzero(self.q_curr)}")
-                print(f"    Max Q-value: {np.max(self.q_curr):.4f}")
-                print(f"    Min Q-value: {np.min(self.q_curr):.4f}")
-            
-            print("-" * 70)
+            # --- Print Episode Summary ---
+            if ep % 100 == 0 or ep <= 10:  # Print first 10, then every 100
+                elapsed = time.time() - start_time
+                avg_time_per_ep = elapsed / ep
+                remaining = (episodes - ep) * avg_time_per_ep
+                rem_str = time.strftime("%H:%M:%S", time.gmtime(remaining))
+                
+                success_marker = "✓" if self.env.seg_idx >= self.env.n_segments - 1 else "✗"
+                
+                # Get current values
+                current_ln_cm = self.ln_cm_history[-1] if self.ln_cm_history else 0.0
+                current_cm = self.cm_history[-1] if self.cm_history else 1.0
+                
+                print(f"{success_marker} Ep {ep:05d}/{episodes} | "
+                      f"ln(CM): {current_ln_cm:7.3f} | "
+                      f"CM: {current_cm:6.4f} | "
+                      f"ΔQ: {delta_i:10.2f} | "
+                      f"Success: {success_count}/{ep} | "
+                      f"ETA: {rem_str}")
         
         print(f"\n{'='*70}")
         print(f"CM ANALYSIS COMPLETE")
         print(f"{'='*70}")
-        print(f"Total time: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))}")
-        print(f"Total episodes: {episodes}")
-        print(f"CM history length: {len(self.cm_history)}")
-        print(f"Delta history length: {len(self.delta_history)}")
+        elapsed_total = time.time() - start_time
+        print(f"Total time: {time.strftime('%H:%M:%S', time.gmtime(elapsed_total))}")
+        print(f"Success rate: {success_count}/{episodes} ({success_count/episodes*100:.1f}%)")
         
-        self.save_plot()
-        self.save_data()
+        # Detect YOUR threshold
+        print(f"\n🔍 Detecting YOUR local optimum threshold...")
+        ln_threshold, phi_threshold = self.detect_local_optimum_threshold()
+        
+        print(f"\n{'='*70}")
+        print(f"YOUR THRESHOLD DETECTED")
+        print(f"{'='*70}")
+        print(f"  ln(CM) threshold = {ln_threshold:.4f}")
+        print(f"  φ threshold = {phi_threshold:.4f}")
+        print(f"\n  This is YOUR φ value to use in Q-SARSA training!")
+        print(f"  (Paper found φ = 0.04 for Tehran/Shiraz Metro)")
+        print(f"{'='*70}\n")
+        
+        print(f"Generating plots with YOUR threshold...")
+        self.save_plot(ln_threshold, phi_threshold)
+        self.save_data(ln_threshold, phi_threshold)
     
-    def save_plot(self):
+    def save_plot(self, ln_threshold, phi_threshold):
         """
-        Generate and save CM plot (similar to Figure 5 in the paper)
-        The φ reference line is from the paper - YOUR φ may be different!
+        Generate plot matching Paper's Figure 5
+        Shows YOUR detected threshold (not paper's)
+        
+        Args:
+            ln_threshold: YOUR detected ln(CM) threshold
+            phi_threshold: YOUR detected φ threshold
         """
-        print("\n📊 Generating CM plot...")
+        print("\n📊 Generating CM analysis plot (Figure 5 style)...")
         
-        # Determine y-axis limits based on data
-        cm_array = np.array(self.cm_history)
-        cm_95percentile = np.percentile(cm_array, 95)  # Ignore outliers
-        y_max = min(max(cm_95percentile * 1.2, 3.0), 10.0)  # Cap at 10 for readability
+        ln_cm_array = np.array(self.ln_cm_history)
         
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        # Create figure matching paper's Figure 5
+        fig, ax = plt.subplots(1, 1, figsize=(14, 8))
         
-        # Plot 1: CM over episodes
-        ax1.plot(self.cm_history, linewidth=1.0, color='blue', alpha=0.7, label='Your CM values')
+        # Plot ln(ΔQi/ΔQi-1) - EXACTLY like Figure 5
+        ax.plot(ln_cm_array, linewidth=1.0, color='#4682B4', alpha=0.8, label='Your ln(CM) values')
         
-        # Add reference line from paper (for comparison only)
-        ax1.axhline(y=config.PHI_REFERENCE, color='red', linestyle='--', 
-                   linewidth=2, label=f'Paper φ = {config.PHI_REFERENCE} (reference only)')
+        # Add YOUR threshold line (RED - detected from your data)
+        ax.axhline(y=ln_threshold, color='red', linestyle='--', linewidth=2.5, 
+                   label=f'YOUR threshold: ln(φ) = {ln_threshold:.3f} (φ = {phi_threshold:.4f})')
         
-        ax1.set_title("Convergence Measurement (CM) Analysis\n"
-                     "CM should DECREASE and stabilize over episodes (see paper Fig. 5)", 
-                     fontsize=14, fontweight='bold')
-        ax1.set_xlabel("Episodes", fontsize=12)
-        ax1.set_ylabel("CM Ratio (ΔQ_i / ΔQ_{i-1})", fontsize=12)
-        ax1.set_ylim([0, y_max])
+        # Calculate where to place annotation (at ~70% of x-axis, at threshold height)
+        annotation_x = len(ln_cm_array) * 0.7
+        annotation_y_arrow = ln_threshold
+        annotation_y_text = ln_threshold + (max(ln_cm_array) - ln_threshold) * 0.3
+        
+        # Add annotation box like in Figure 5
+        ax.annotate('Starts failing\nto local\noptimum', 
+                    xy=(annotation_x, annotation_y_arrow), 
+                    xytext=(annotation_x * 1.05, annotation_y_text),
+                    fontsize=14, fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.8', facecolor='#4682B4', 
+                             alpha=0.7, edgecolor='black', linewidth=2),
+                    arrowprops=dict(arrowstyle='->', color='red', lw=2.5),
+                    color='white',
+                    ha='left')
+        
+        # Styling to match Figure 5
+        ax.set_xlabel('Iteration', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Ln(ΔQi/ΔQi-1)', fontsize=14, fontweight='bold')
+        ax.set_title(f'Diagram of averaged ln(ΔQi/ΔQi-1) changes for local optimum cases\n' + 
+                     f'YOUR Threshold: φ = {phi_threshold:.4f}', 
+                     fontsize=16, fontweight='bold', pad=20)
+        
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        ax.legend(fontsize=12, loc='upper right')
+        
+        # Set y-axis limits
+        y_min = max(min(ln_cm_array), -4.5)
+        y_max = max(max(ln_cm_array), 1.5)
+        ax.set_ylim([y_min, y_max])
+        
+        plt.tight_layout()
+        
+        # Save main plot
+        save_path = os.path.join(config.OUTPUT_DIR, "cm_plot_figure5.png")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"✓ Figure 5 style plot saved to: {save_path}")
+        
+        # --- Additional Analysis Plot ---
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+        
+        # Top: ln(CM) with YOUR threshold
+        ax1.plot(ln_cm_array, linewidth=1.0, color='#4682B4', alpha=0.8, label='Your ln(CM)')
+        ax1.axhline(y=ln_threshold, color='red', linestyle='--', linewidth=2, 
+                   label=f'YOUR threshold: {ln_threshold:.3f}')
+        
+        # Add shaded region below threshold
+        ax1.fill_between(range(len(ln_cm_array)), ln_threshold, y_min, 
+                        alpha=0.1, color='red', label='Local optimum region')
+        
+        ax1.set_xlabel('Episode', fontsize=12)
+        ax1.set_ylabel('ln(ΔQi/ΔQi-1)', fontsize=12)
+        ax1.set_title('YOUR ln(CM) Analysis with Detected Threshold', fontsize=14, fontweight='bold')
         ax1.legend(fontsize=10)
         ax1.grid(True, alpha=0.3)
+        ax1.set_ylim([y_min, y_max])
         
-        # Add text annotation
-        ax1.text(0.02, 0.98, 
-                f'Expected pattern: CM starts high (1-3), then DECREASES to stable value.\n'
-                f'Your CM max: {np.max(cm_array):.2f}, median: {np.median(cm_array):.4f}\n'
-                f'Paper\'s φ = {config.PHI_REFERENCE} (shown for comparison)',
-                transform=ax1.transAxes, fontsize=9,
-                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        # Plot 2: Delta over episodes (log scale for better visualization)
+        # Bottom: Raw ΔQ values (for reference)
         ax2.plot(self.delta_history, linewidth=1.0, color='green', alpha=0.7)
-        ax2.set_xlabel("Episodes", fontsize=12)
-        ax2.set_ylabel("Delta (ΔQ_i)", fontsize=12)
-        ax2.set_title("Q-table Change per Episode (should decrease as learning progresses)", fontsize=12)
+        ax2.set_xlabel('Episode', fontsize=12)
+        ax2.set_ylabel('ΔQi (Q-table change)', fontsize=12)
+        ax2.set_title('Q-table Changes per Episode (should decrease)', fontsize=12)
         ax2.set_yscale('log')
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        
-        # Save plot
-        save_path = os.path.join(config.OUTPUT_DIR, "cm_plot.png")
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        analysis_path = os.path.join(config.OUTPUT_DIR, "cm_analysis_detailed.png")
+        plt.savefig(analysis_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✓ Plot saved to: {save_path}")
+        print(f"✓ Detailed analysis plot saved to: {analysis_path}")
         
-        # Zoomed version focusing on convergence region
-        fig, ax = plt.subplots(1, 1, figsize=(14, 6))
-        ax.plot(self.cm_history, linewidth=1.0, color='blue', alpha=0.7, label='Your CM values')
-        ax.axhline(y=config.PHI_REFERENCE, color='red', linestyle='--', 
-                  linewidth=2, label=f'Paper φ = {config.PHI_REFERENCE} (reference)')
+        # Print statistics
+        print(f"\n📈 YOUR CM ANALYSIS:")
+        print(f"   ln(CM) statistics:")
+        print(f"     Mean:   {np.mean(ln_cm_array):.4f}")
+        print(f"     Median: {np.median(ln_cm_array):.4f}")
+        print(f"     Min:    {np.min(ln_cm_array):.4f}")
+        print(f"     Max:    {np.max(ln_cm_array):.4f}")
+        print(f"\n   YOUR DETECTED THRESHOLD:")
+        print(f"     ln(φ) = {ln_threshold:.4f}")
+        print(f"     φ = {phi_threshold:.4f}")
         
-        # Adaptive zoom based on data
-        zoom_max = min(np.percentile(cm_array, 90), 2.0)
-        ax.set_ylim([0, zoom_max])
+        # Compare with paper
+        print(f"\n   For comparison:")
+        print(f"     Paper's φ = 0.04 (Tehran/Shiraz Metro)")
+        print(f"     YOUR φ = {phi_threshold:.4f}")
         
-        ax.set_title(f"CM Analysis (Zoomed: 0-{zoom_max:.1f} range)\n"
-                    "Look for stable convergence region in later episodes", fontsize=14)
-        ax.set_xlabel("Episodes", fontsize=12)
-        ax.set_ylabel("CM Ratio", fontsize=12)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Add reference lines
-        for threshold in [0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20]:
-            if threshold < zoom_max:
-                ax.axhline(y=threshold, color='gray', linestyle=':', linewidth=0.5, alpha=0.5)
-                ax.text(len(self.cm_history)*0.98, threshold, f'{threshold:.2f}', 
-                       fontsize=8, va='center', ha='right', color='gray')
-        
-        zoom_path = os.path.join(config.OUTPUT_DIR, "cm_plot_zoomed.png")
-        plt.savefig(zoom_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✓ Zoomed plot saved to: {zoom_path}")
-        print(f"\n💡 ANALYSIS:")
-        print(f"   Paper's Fig. 5 shows CM decreasing from ~2.0 to ~0.04-0.10")
-        print(f"   Your CM: max={np.max(cm_array):.2f}, median={np.median(cm_array):.4f}")
-        
-        if np.median(cm_array) > 0.5:
-            print(f"   ⚠️  WARNING: CM is NOT converging properly!")
-            print(f"   Expected: CM should decrease over episodes")
-            print(f"   Check: Are episodes completing successfully?")
-        else:
-            print(f"   ✓ CM appears to be converging")
-            print(f"   Look for the stable region in later episodes")
-
+        # Count episodes below threshold
+        below_threshold = np.sum(ln_cm_array < ln_threshold)
+        print(f"\n   Episodes below threshold: {below_threshold}/{len(ln_cm_array)} "
+              f"({below_threshold/len(ln_cm_array)*100:.1f}%)")
     
-    def save_data(self):
-        """
-        Save CM and Delta data to file for further analysis
-        """
-        print("\n💾 Saving data...")
+    def save_data(self, ln_threshold, phi_threshold):
+        """Save CM data with YOUR detected threshold"""
+        print("\n💾 Saving CM analysis data...")
         
         data_path = os.path.join(config.OUTPUT_DIR, "cm_data.npz")
         np.savez(data_path,
+                 ln_cm_history=np.array(self.ln_cm_history),
                  cm_history=np.array(self.cm_history),
                  delta_history=np.array(self.delta_history),
-                 q_final=self.q_curr)
+                 q_final=self.q_curr,
+                 ln_threshold=ln_threshold,
+                 phi_threshold=phi_threshold)
         
         print(f"✓ Data saved to: {data_path}")
         
-        # Also save as text for easy inspection
+        # Save text summary
         txt_path = os.path.join(config.OUTPUT_DIR, "cm_summary.txt")
         with open(txt_path, 'w') as f:
             f.write("="*70 + "\n")
-            f.write("CM ANALYSIS SUMMARY\n")
+            f.write("CM ANALYSIS SUMMARY - YOUR Results\n")
             f.write("="*70 + "\n\n")
             
-            f.write("PURPOSE: Find optimal φ threshold for YOUR route data\n")
-            f.write("The paper used φ = 0.04 for Tehran/Shiraz Metro\n")
-            f.write("YOUR φ will likely be different!\n\n")
-            
-            f.write("-"*70 + "\n")
-            f.write(f"Total Episodes: {len(self.cm_history)}\n")
-            f.write(f"Paper's φ (reference): {config.PHI_REFERENCE}\n\n")
+            f.write("METHODOLOGY (Paper Section 3.4, Figure 5):\n")
+            f.write("  1. Run SARSA algorithm for many episodes\n")
+            f.write("  2. Calculate ln(ΔQi/ΔQi-1) for each episode\n")
+            f.write("  3. Find where ln(CM) stabilizes (last 20% of episodes)\n")
+            f.write("  4. Median of stable region = YOUR threshold\n\n")
             
             f.write("="*70 + "\n")
-            f.write("CM STATISTICS (for your data):\n")
+            f.write("YOUR DETECTED THRESHOLD:\n")
             f.write("="*70 + "\n")
-            f.write(f"  Mean:      {np.mean(self.cm_history):.4f}\n")
-            f.write(f"  Median:    {np.median(self.cm_history):.4f}\n")
-            f.write(f"  Std Dev:   {np.std(self.cm_history):.4f}\n")
-            f.write(f"  Min:       {np.min(self.cm_history):.4f}\n")
-            f.write(f"  Max:       {np.max(self.cm_history):.4f}\n\n")
+            f.write(f"  ln(φ) = {ln_threshold:.4f}\n")
+            f.write(f"  φ = {phi_threshold:.4f}\n\n")
+            f.write(f"  👉 USE THIS VALUE (φ = {phi_threshold:.4f}) in Q-SARSA training!\n\n")
             
-            # Calculate percentiles
-            f.write("Percentiles:\n")
-            for p in [10, 25, 50, 75, 90]:
-                val = np.percentile(self.cm_history, p)
-                f.write(f"  {p}th:      {val:.4f}\n")
+            ln_cm_array = np.array(self.ln_cm_history)
+            cm_array = np.array(self.cm_history)
+            
+            f.write("="*70 + "\n")
+            f.write("STATISTICS:\n")
+            f.write("="*70 + "\n")
+            f.write(f"Total Episodes: {len(ln_cm_array)}\n\n")
+            
+            f.write("ln(CM) Statistics:\n")
+            f.write(f"  Mean:      {np.mean(ln_cm_array):.4f}\n")
+            f.write(f"  Median:    {np.median(ln_cm_array):.4f}\n")
+            f.write(f"  Std Dev:   {np.std(ln_cm_array):.4f}\n")
+            f.write(f"  Min:       {np.min(ln_cm_array):.4f}\n")
+            f.write(f"  Max:       {np.max(ln_cm_array):.4f}\n\n")
+            
+            # Analyze stable region (last 20%)
+            stable_start = int(len(ln_cm_array) * 0.8)
+            stable_ln = ln_cm_array[stable_start:]
+            stable_cm = cm_array[stable_start:]
+            
+            f.write("Stable Region (last 20% of episodes):\n")
+            f.write(f"  Episodes: {stable_start} to {len(ln_cm_array)}\n")
+            f.write(f"  ln(CM) mean:   {np.mean(stable_ln):.4f}\n")
+            f.write(f"  ln(CM) median: {np.median(stable_ln):.4f}\n")
+            f.write(f"  CM ratio mean: {np.mean(stable_cm):.4f}\n\n")
+            
+            # Comparison with paper
+            f.write("="*70 + "\n")
+            f.write("COMPARISON WITH PAPER:\n")
+            f.write("="*70 + "\n")
+            f.write(f"  Paper (Tehran/Shiraz Metro):\n")
+            f.write(f"    ln(φ) = -3.21\n")
+            f.write(f"    φ = 0.04\n\n")
+            f.write(f"  YOUR Route:\n")
+            f.write(f"    ln(φ) = {ln_threshold:.4f}\n")
+            f.write(f"    φ = {phi_threshold:.4f}\n\n")
+            
+            diff_percent = ((phi_threshold - 0.04) / 0.04) * 100
+            f.write(f"  Difference: {diff_percent:+.1f}%\n")
+            if abs(diff_percent) < 20:
+                f.write(f"  → Similar to paper's threshold\n")
+            elif phi_threshold > 0.04:
+                f.write(f"  → Higher threshold (more stable, switches to Q-learning earlier)\n")
+            else:
+                f.write(f"  → Lower threshold (more SARSA updates, slower switching)\n")
             
             f.write("\n" + "="*70 + "\n")
-            f.write("ANALYSIS (comparing to paper's φ = 0.04):\n")
-            f.write("="*70 + "\n")
-            
-            # Compare with paper's threshold
-            below_paper = np.sum(np.array(self.cm_history) < config.PHI_REFERENCE)
-            above_paper = len(self.cm_history) - below_paper
-            
-            f.write(f"Episodes below paper's φ (0.04): {below_paper} "
-                   f"({below_paper/len(self.cm_history)*100:.1f}%)\n")
-            f.write(f"Episodes above paper's φ (0.04): {above_paper} "
-                   f"({above_paper/len(self.cm_history)*100:.1f}%)\n\n")
-            
-            # Suggest potential φ values
-            f.write("="*70 + "\n")
-            f.write("SUGGESTED φ VALUES TO CONSIDER:\n")
-            f.write("="*70 + "\n")
-            f.write("(Analyze the plot to confirm!)\n\n")
-            
-            # Last 500 episodes (should be more stable)
-            if len(self.cm_history) > 500:
-                recent_cm = self.cm_history[-500:]
-                f.write("Based on last 500 episodes (more stable):\n")
-                f.write(f"  Mean:      {np.mean(recent_cm):.4f}\n")
-                f.write(f"  Median:    {np.median(recent_cm):.4f}\n")
-                f.write(f"  25th percentile: {np.percentile(recent_cm, 25):.4f}\n")
-                f.write(f"  75th percentile: {np.percentile(recent_cm, 75):.4f}\n\n")
-                
-                f.write(f"💡 Consider φ ≈ {np.median(recent_cm):.4f} (median of last 500)\n")
-                f.write(f"   or range [{np.percentile(recent_cm, 25):.4f}, "
-                       f"{np.percentile(recent_cm, 75):.4f}]\n\n")
-            
-            f.write("="*70 + "\n")
             f.write("NEXT STEPS:\n")
             f.write("="*70 + "\n")
-            f.write("1. Look at cm_plot.png and cm_plot_zoomed.png\n")
-            f.write("2. Identify where CM stabilizes/converges\n")
-            f.write("3. Choose YOUR φ value from the stable region\n")
-            f.write("4. Use that φ in Q-SARSA implementation\n")
-            f.write("5. Compare your results with the paper's φ = 0.04\n")
+            f.write("1. ✓ CM analysis complete\n")
+            f.write("2. Check cm_plot_figure5.png - verify threshold looks correct\n")
+            f.write(f"3. Use φ = {phi_threshold:.4f} in Q-SARSA training:\n")
+            f.write("   python train_qsarsa.py\n")
+            f.write(f"   (Enter {phi_threshold:.4f} when prompted for φ)\n")
         
         print(f"✓ Summary saved to: {txt_path}")
-        print(f"\n📋 Open {txt_path} for suggested φ values based on your data!")
+        print(f"\n📋 YOUR φ = {phi_threshold:.4f}")
+        print(f"   Read {txt_path} for full details!")
