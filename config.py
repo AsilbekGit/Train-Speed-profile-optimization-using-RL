@@ -31,39 +31,40 @@ VEL_BIN_SIZE = 0.5        # Discretization for Q-Table (m/s)
 # --- Episode Control ---
 MAX_STEPS_PER_EPISODE = 20000  # Maximum steps per episode to prevent infinite loops
 STUCK_THRESHOLD = 100          # Number of consecutive steps with no movement to detect stuck
-                               # Increased from 50 to 100 - train might coast/brake temporarily
 POSITION_EPSILON = 0.01        # Minimum position change (meters) to consider as movement
 
 # --- Convergence Measurement (CM Analysis) ---
-# NOTE: φ threshold is NOT fixed! It depends on your specific route data.
-# The paper found φ = 0.04 for Tehran/Shiraz Metro, but YOUR φ will be different.
-# 
-# Purpose of this CM analysis: Find YOUR optimal φ by analyzing the plot
-# 
-# For plotting reference only (compare with paper's result):
-PHI_REFERENCE = 0.04           # Paper's φ value (for comparison only)
-                               
-# You will determine YOUR actual φ threshold after seeing the CM plot:
-# - Look for where CM stabilizes/converges in your plot
-# - This will be YOUR φ value to use in Q-SARSA later
+# Paper Methodology (Section 3.4, Figure 5):
+# 1. Run SARSA for 25,000 scenarios
+# 2. Calculate ln(ΔQi/ΔQi-1) for each episode
+# 3. Plot ln(CM) vs iteration (Figure 5)
+# 4. Find where ln(CM) goes below threshold (indicates local optimum)
+# 5. Paper found: ln(CM) → -3.21, which means φ = e^(-3.21) ≈ 0.04
+#
+# YOUR φ threshold will be different depending on your route data!
+# The CM analysis will help you find it.
+
+PHI_REFERENCE = 0.04           # Paper's φ for Tehran/Shiraz (reference only)
+LN_PHI_REFERENCE = -3.21       # ln(0.04) = -3.21 (Figure 5 threshold line)
+
+# CM Analysis settings
+CM_ANALYSIS_EPISODES = 25000   # Paper used 25,000 scenarios
+                               # You can use less for quick testing (e.g., 10,000)
 
 # --- Debug and Logging ---
 DEBUG_MODE = False             # Set to True for detailed debugging info
 PRINT_EVERY_STEP = False       # Set to True to print every single step (WARNING: very verbose!)
-                               # Recommended: False for normal runs, True only for debugging first few episodes
 
 # --- Action Names (for readable output) ---
 ACTION_NAMES = ['Brake', 'Coast', 'Cruise', 'Power']
 
 # --- Notes ---
-# DEBUG_MODE: Shows detailed Q-value updates, position tracking, etc.
-# PRINT_EVERY_STEP: Shows every single step in the episode (use with small episode counts)
-# 
-# For normal training runs:
+# For CM Analysis (finding φ):
 #   DEBUG_MODE = False
 #   PRINT_EVERY_STEP = False
+#   Run with episodes=10,000 to 25,000
 #
-# For debugging/understanding what's happening:
+# For debugging specific episodes:
 #   DEBUG_MODE = True
 #   PRINT_EVERY_STEP = True
-#   And run with episodes=1 or 2
+#   Run with episodes=1 or 2

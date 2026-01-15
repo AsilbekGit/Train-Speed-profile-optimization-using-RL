@@ -28,11 +28,10 @@ class TrainEnv:
         self.seg_idx = 0
         self.pos_in_seg = 0.0
         
-        # INCREASED: Paper assumes train starts with good initial velocity
-        # "The train moves to location x_start with maximum acceleration. 
-        # At point x_start the train has speed v_start."
-        # Start at 50 km/h (~14 m/s) to give agent better chance
-        self.v = 14.0  # 50 km/h - reasonable operational speed
+        # SIGNIFICANTLY INCREASED: Start at operational speed
+        # Paper assumes train accelerates to x_start first
+        # Need higher speed to handle uphills without getting stuck
+        self.v = 25.0  # 90 km/h - strong operational speed
         
         self.t = 0.0
         self.energy_kwh = 0.0
@@ -76,13 +75,9 @@ class TrainEnv:
             pass  # No traction or braking, only resistance
             
         elif action == 2:  # Cruise (maintain speed)
-            # Apply just enough force to counter resistance
-            if resistance > 0:
-                f_trac = resistance
-            else:
-                # On downhill, resistance might be negative
-                # Don't apply traction if gravity is accelerating us
-                f_trac = 0
+            # FIXED: Always apply traction to counter resistance
+            # Don't disable traction on downhill
+            f_trac = max(0, resistance)  # Apply force to maintain speed
                 
         elif action == 3:  # Max Power
             f_trac = self.phy.get_max_traction_force(self.v)
@@ -101,24 +96,19 @@ class TrainEnv:
         # Cap at maximum speed
         v_next = min(v_next, config.MAX_SPEED_MS)
 
-        # Update Position using kinematic equation: s = vt + 0.5at²
-        # Use average velocity for more accurate position update
+        # Update Position using kinematic equation
         avg_velocity = (self.v + v_next) / 2.0
         ds = avg_velocity * config.DT
         
-        # Ensure forward progress (important for stuck detection)
+        # Ensure forward progress
         ds = max(0.0, ds)
         
         self.pos_in_seg += ds
 
         # Energy Calculation
-        # Power is consumed only if Traction force > 0
-        # P_mechanical = F_traction * velocity
-        # P_electrical = P_mechanical / efficiency
         if f_trac > 0 and self.v > 0:
             p_mech_watts = f_trac * self.v
             p_elec_watts = p_mech_watts / self.phy.eta
-            # Energy in kWh = (Power in Watts * Time in seconds) / (1000 * 3600)
             e_kwh_step = (p_elec_watts * config.DT) / 3.6e6
         else:
             e_kwh_step = 0.0
@@ -137,7 +127,7 @@ class TrainEnv:
             # Check if reached end
             if self.seg_idx >= self.n_segments:
                 self.done = True
-                self.seg_idx = self.n_segments - 1  # Cap at last segment
+                self.seg_idx = self.n_segments - 1
                 self.pos_in_seg = 0.0
                 break
 
@@ -147,27 +137,31 @@ class TrainEnv:
         # Calculate reward
         reward = 0.0
 
-        # Progress reward (NEW!)
-        progress_reward = (self.position_km - old_position_km) * 100  # Reward forward movement!
+        # Progress reward - INCREASED to encourage forward movement
+        progress_reward = (self.position_km - old_position_km) * 200  # Was 100, now 200
 
-        # Energy penalty (REDUCED)
-        energy_penalty = -e_kwh_step * 50.0  # Was 100, now 50
+        # Energy penalty - REDUCED to not discourage movement
+        energy_penalty = -e_kwh_step * 20.0  # Was 50, now 20
 
-        # Time penalty (REDUCED)
-        time_penalty = -0.05  # Was 0.1, now 0.05
+        # Time penalty - REDUCED
+        time_penalty = -0.01  # Was 0.05, now 0.01
 
         reward = progress_reward + energy_penalty + time_penalty
 
-        # Speed limit violation (keep strong)
+        # Speed limit violation - keep but reduce penalty
         if self.v > limit:
-            reward -= 50.0 + (self.v - limit) * 10
+            reward -= 20.0 + (self.v - limit) * 5  # Reduced from 50 and 10
 
-        # Success bonus (keep large)
+        # Success bonus - MUCH LARGER
         if self.done:
-            reward += 1000.0
+            reward += 5000.0  # Was 1000, now 5000 - make completion very attractive
             # Bonus for time efficiency
-            if self.t < config.MAX_STEPS_PER_EPISODE * 0.8:
-                reward += 500.0
+            if self.t < config.MAX_STEPS_PER_EPISODE * 0.5:
+                reward += 2000.0
+
+        # Penalty for going too slow (helps detect stuck without hard termination)
+        if self.v < 2.0 and not self.done:
+            reward -= 5.0  # Penalty for being too slow
         
         info = {
             'segment': self.seg_idx,
