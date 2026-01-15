@@ -28,11 +28,11 @@ class TrainEnv:
         self.seg_idx = 0
         self.pos_in_seg = 0.0
         
-        # CRITICAL FIX: Start with initial velocity (as in paper Section 3.4)
+        # INCREASED: Paper assumes train starts with good initial velocity
         # "The train moves to location x_start with maximum acceleration. 
         # At point x_start the train has speed v_start."
-        # Starting from complete rest (v=0) causes the train to get stuck
-        self.v = 10.0  # Start at 10 m/s (~36 km/h) - reasonable initial speed
+        # Start at 50 km/h (~14 m/s) to give agent better chance
+        self.v = 14.0  # 50 km/h - reasonable operational speed
         
         self.t = 0.0
         self.energy_kwh = 0.0
