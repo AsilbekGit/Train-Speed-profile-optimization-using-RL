@@ -16,7 +16,7 @@ POWER_WATTS = 3640000.0   # 3640 kW
 EFFICIENCY = 0.85
 MAX_ACC = 0.6             # m/s^2 (approx 2.16 km/h/s)
 MAX_DEC = -0.8            # m/s^2 (approx 2.88 km/h/s)
-MAX_SPEED_MS = 130.0 
+MAX_SPEED_MS = 130.0 / 3.6
 
 # --- Davis Coefficients (Uncalibrated base) ---
 # C0 will be calibrated dynamically

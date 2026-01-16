@@ -17,7 +17,6 @@ class TrainEnv:
         print(f"Environment initialized:")
         print(f"  Segments: {self.n_segments}")
         print(f"  Total distance: {self.n_segments * config.DX / 1000:.1f} km")
-        print(f"  Actions: {self.action_space}")
         
         self.reset()
 
@@ -25,13 +24,15 @@ class TrainEnv:
         """Reset environment to initial state"""
         self.seg_idx = 0
         self.pos_in_seg = 0.0
-        self.v = 25.0  # 90 km/h
+        
+        # BALANCED: Not too low, not too high
+        self.v = 20.0  # 72 km/h - reasonable operational speed
+        
         self.t = 0.0
         self.energy_kwh = 0.0
         self.done = False
         
-        # Track milestones for rewards
-        self.milestones_reached = set()
+        # REMOVED milestone tracking - made problem too easy
         self.max_segment_reached = 0
         
         return self._get_state()
@@ -97,70 +98,55 @@ class TrainEnv:
                 self.pos_in_seg = 0.0
                 break
 
-        # Track progress
         if self.seg_idx > self.max_segment_reached:
             self.max_segment_reached = self.seg_idx
 
         self.position_km = (self.seg_idx * config.DX + self.pos_in_seg) / 1000.0
 
         # ============================================================
-        # REWARD FUNCTION - Shaped for Long Route Learning
+        # BALANCED REWARD FUNCTION
+        # Goal: 10-40% success rate for meaningful CM analysis
         # ============================================================
         
         reward = 0.0
-        
-        # 1. STRONG PROGRESS REWARD (most important for learning)
         distance_moved_km = self.position_km - old_position_km
-        progress_reward = distance_moved_km * 500  # VERY HIGH (was 200)
+        
+        # 1. Progress reward - MODERATE (not too high!)
+        progress_reward = distance_moved_km * 100  # Was 500, now 100
         reward += progress_reward
         
-        # 2. MILESTONE BONUSES - Critical for long routes!
-        # Every 10km, give a bonus
-        current_milestone = int(self.position_km // 10)
-        old_milestone = int(old_position_km // 10)
-        
-        if current_milestone > old_milestone and current_milestone not in self.milestones_reached:
-            milestone_bonus = 500  # Big bonus for each 10km
-            reward += milestone_bonus
-            self.milestones_reached.add(current_milestone)
-        
-        # 3. FORWARD PROGRESS BONUS (moved to new segment)
+        # 2. Forward segment bonus - SMALL
         if self.seg_idx > old_segment:
-            reward += 5.0  # Small bonus per segment
+            reward += 2.0  # Small bonus per segment (was 5.0)
         
-        # 4. DISTANCE-TO-GO SHAPING (encourage getting closer to goal)
-        distance_to_goal = (self.n_segments - self.seg_idx) * config.DX / 1000.0
-        # Negative reward proportional to distance remaining
-        reward -= distance_to_goal * 0.1
+        # 3. Energy penalty - BALANCED
+        reward -= e_kwh_step * 10.0  # Not too small, not too large
         
-        # 5. Energy penalty (VERY SMALL - don't discourage movement!)
-        reward -= e_kwh_step * 5.0  # Was 20, now 5
+        # 4. Time penalty - SMALL
+        reward -= 0.01
         
-        # 6. Time penalty (VERY SMALL)
-        reward -= 0.001  # Was 0.01, now 0.001
-        
-        # 7. Speed limit violation (moderate penalty)
+        # 5. Speed limit violation - STRONG
         if self.v > limit:
-            reward -= 10.0 + (self.v - limit) * 2
+            reward -= 30.0 + (self.v - limit) * 5
         
-        # 8. Penalty for being too slow (but don't kill exploration)
-        if self.v < 5.0 and not self.done:
-            reward -= 2.0
+        # 6. Penalty for being too slow
+        if self.v < 3.0 and not self.done:
+            reward -= 3.0
         
-        # 9. HUGE SUCCESS BONUS (make completion DOMINANT)
+        # 7. SUCCESS BONUS - MODERATE (not too high!)
+        # This is the key: Make completion valuable but not overwhelming
         if self.done and self.seg_idx >= self.n_segments - 1:
-            reward += 10000.0  # Was 5000, now 10000!
+            reward += 2000.0  # Was 10000, now 2000
             
-            # Additional bonus for efficiency
-            if self.t < 3000:  # Under 50 minutes
-                reward += 3000.0
-            if self.energy_kwh < 3000:  # Under 3000 kWh
-                reward += 2000.0
+            # Efficiency bonuses - MODERATE
+            if self.t < 3500:  # Fast completion
+                reward += 500.0
+            if self.energy_kwh < 2800:  # Efficient
+                reward += 300.0
         
-        # 10. NEW: "Best so far" bonus
-        # If reached farther than ever before, give bonus
-        if self.seg_idx == self.max_segment_reached and self.seg_idx > old_segment:
-            reward += 10.0  # Exploration bonus
+        # 8. REMOVED: Milestone bonuses (made it too easy)
+        # 9. REMOVED: Distance-to-goal shaping (too much guidance)
+        # 10. REMOVED: "Best so far" bonus (unnecessary with balanced rewards)
         
         info = {
             'segment': self.seg_idx,
@@ -172,8 +158,6 @@ class TrainEnv:
             'acceleration': acc,
             'speed_limit': limit,
             'violation': self.v > limit,
-            'distance_to_goal_km': distance_to_goal,
-            'milestones': len(self.milestones_reached),
             'progress_percent': (self.seg_idx / self.n_segments) * 100
         }
 
