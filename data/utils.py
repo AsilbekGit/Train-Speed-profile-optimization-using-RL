@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import config
+import env_settings.config
 
 def load_data():
     print(f"Loading data from {config.COORD_PATH} and {config.DATA_PATH}...")

@@ -11,7 +11,7 @@ Activation: tanh for hidden layers, sigmoid for output
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-import config
+import env_settings.config
 import time
 
 class DeepQNetwork:

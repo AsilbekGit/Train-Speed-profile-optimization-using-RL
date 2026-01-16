@@ -8,7 +8,7 @@ by Sandidzadeh & Havaei (2023)
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-import config
+import env_settings.config
 from data.utils import discretize_state
 import time
 

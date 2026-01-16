@@ -1,6 +1,6 @@
 from data.utils import load_data
-from physics import TrainPhysics
-from environment import TrainEnv
+from env_settings.physics import TrainPhysics
+from env_settings.environment import TrainEnv
 from cm_analyzer import CMAnalyzer
 
 def main():

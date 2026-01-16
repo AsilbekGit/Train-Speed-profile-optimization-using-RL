@@ -4,8 +4,8 @@ Run this AFTER completing CM analysis to find YOUR φ value
 """
 
 from data.utils import load_data
-from physics import TrainPhysics
-from environment import TrainEnv
+from env_settings.physics import TrainPhysics
+from env_settings.environment import TrainEnv
 from dqn import DeepQNetwork
 
 def main():

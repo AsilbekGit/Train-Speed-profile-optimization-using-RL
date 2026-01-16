@@ -11,10 +11,10 @@ Run this BEFORE running the full training!
 """
 
 from data.utils import load_data
-from physics import TrainPhysics
-from environment import TrainEnv
+from env_settings.physics import TrainPhysics
+from env_settings.environment import TrainEnv
 from cm_analyzer import CMAnalyzer
-import config
+import env_settings.config
 
 def test_data_loading():
     """Test if data files can be loaded"""
