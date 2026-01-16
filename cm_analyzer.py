@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-import env_settings.config
+import env_settings.config as config
 from data.utils import discretize_state
 import time
 from scipy.ndimage import uniform_filter1d

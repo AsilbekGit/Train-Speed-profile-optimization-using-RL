@@ -5,7 +5,7 @@ Diagnostic script to check why episodes aren't completing
 from data.utils import load_data
 from env_settings.physics import TrainPhysics
 from env_settings.environment import TrainEnv
-import env_settings.config
+import env_settings.config as config
 
 def diagnose():
     print("="*70)

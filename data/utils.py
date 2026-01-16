@@ -1,17 +1,17 @@
 import pandas as pd
 import numpy as np
-import env_settings.config
+import env_settings.config as config
 
 def load_data():
-    print(f"Loading data from {env_settings.config.COORD_PATH} and {env_settings.config.DATA_PATH}...")
+    print(f"Loading data from {config.COORD_PATH} and {config.DATA_PATH}...")
     
     # 1. Load Coordinates
     # Handle the specific tab separation
-    coords = pd.read_csv(env_settings.config.COORD_PATH, sep=r'\t', header=None, engine='python')
+    coords = pd.read_csv(config.COORD_PATH, sep=r'\t', header=None, engine='python')
     coords.columns = ['id', 'x', 'y']
     
     # 2. Load Segment Data
-    data = pd.read_csv(env_settings.config.DATA_PATH)
+    data = pd.read_csv(config.DATA_PATH)
     
     # Cleaning 'Unnamed' columns if they exist
     if 'Unnamed: 0' in data.columns:
@@ -45,7 +45,7 @@ def discretize_state(state):
     s_idx = int(state[0])
     
     # Velocity binning
-    v_idx = int(state[1] / env_settings.config.VEL_BIN_SIZE)
+    v_idx = int(state[1] / config.VEL_BIN_SIZE)
     
     # Cap velocity index at 100 bins (0 to 50 m/s) to prevent out-of-bounds
     v_idx = min(v_idx, 99)

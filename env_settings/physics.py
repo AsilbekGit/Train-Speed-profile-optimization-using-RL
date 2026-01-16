@@ -1,4 +1,4 @@
-import env_settings.config
+import env_settings.config as config
 
 class TrainPhysics:
     def __init__(self):
