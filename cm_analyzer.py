@@ -32,7 +32,7 @@ class CMAnalyzer:
         self.episode_max_progress = []
         
         # NORMAL hyperparameters (not too aggressive!)
-        self.alpha = 0.1
+        self.alpha = 0.01     # learning rate new from 0.1 to 0.01
         self.gamma = 0.95
         self.epsilon = 0.15  # Standard ε-greedy (was 0.25)
         self.epsilon_decay = 0.999  # Slower than before
