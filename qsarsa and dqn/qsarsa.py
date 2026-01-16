@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import config
-from utils import discretize_state
+from data.utils import discretize_state
 import time
 
 class QSARSA:

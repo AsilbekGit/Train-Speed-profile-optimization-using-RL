@@ -3,7 +3,7 @@ Train Deep-Q Network
 Run this AFTER completing CM analysis to find YOUR φ value
 """
 
-from utils import load_data
+from data.utils import load_data
 from physics import TrainPhysics
 from environment import TrainEnv
 from dqn import DeepQNetwork

@@ -2,7 +2,7 @@
 Diagnostic script to check why episodes aren't completing
 """
 
-from utils import load_data
+from data.utils import load_data
 from physics import TrainPhysics
 from environment import TrainEnv
 import config

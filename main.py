@@ -1,4 +1,4 @@
-from utils import load_data
+from data.utils import load_data
 from physics import TrainPhysics
 from environment import TrainEnv
 from cm_analyzer import CMAnalyzer
