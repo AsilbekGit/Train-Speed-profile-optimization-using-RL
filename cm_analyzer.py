@@ -1,8 +1,8 @@
 """
-CM Analyzer - Clean Version
-===========================
-Simple SARSA-based CM analysis with fixed hyperparameters.
-Based on Section 3.4, Figure 5 from the paper.
+CM Analyzer - FIXED Q-table Initialization
+==========================================
+Problem: Q-table starts at zeros → argmax returns 0 (Brake) → train stops
+Fix: Initialize with bias toward Power action
 """
 
 import numpy as np
@@ -18,14 +18,22 @@ class CMAnalyzer:
         self.env = env
         self.q_shape = (env.n_segments, 100, 4)
         
-        # Initialize Q-table
+        # ============================================================
+        # FIX: Initialize Q-table with bias toward POWER action
+        # ============================================================
+        # Actions: 0=Brake, 1=Coast, 2=Cruise, 3=Power
+        # If all zeros, argmax returns 0 (Brake) → train stops!
         self.q_curr = np.zeros(self.q_shape)
-        self.q_prev = np.zeros(self.q_shape)
+        self.q_curr[:, :, 3] = 1.0  # Bias toward Power action
+        self.q_curr[:, :, 2] = 0.5  # Second choice: Cruise
+        
+        self.q_prev = self.q_curr.copy()
         
         print(f"Q-table shape: {self.q_shape}")
         print(f"  Segments: {env.n_segments}")
         print(f"  Velocity bins: 100")
         print(f"  Actions: 4 (Brake, Coast, Cruise, Power)")
+        print(f"  Initialization: Biased toward Power action")
         
         # History
         self.delta_history = []
@@ -34,37 +42,31 @@ class CMAnalyzer:
         self.success_history = []
         self.episode_max_progress = []
         
-        # Fixed hyperparameters (from paper)
-        self.alpha = 0.1    # Learning rate
-        self.gamma = 0.95   # Discount factor
-        self.epsilon = 0.15 # Exploration rate
+        # Fixed hyperparameters
+        self.alpha = 0.1
+        self.gamma = 0.95
+        self.epsilon = 0.3  # Higher exploration
         
         print(f"\nHyperparameters:")
         print(f"  α (learning rate): {self.alpha}")
         print(f"  γ (discount): {self.gamma}")
         print(f"  ε (exploration): {self.epsilon}")
-        print(f"Learning rate: α = {self.alpha}")
     
     def smooth_curve(self, data, window_size=100):
-        """Apply moving average smoothing"""
         if len(data) < window_size:
             window_size = max(len(data) // 10, 1)
         return uniform_filter1d(data, size=window_size, mode='nearest')
     
     def detect_threshold_from_trend(self, ln_cm_smooth):
-        """Detect threshold where ln(CM) stabilizes"""
         stable_start = int(len(ln_cm_smooth) * 0.7)
-        
         for i in range(len(ln_cm_smooth) - 200):
             window = ln_cm_smooth[i:i+200]
             if np.std(window) < 0.3:
                 stable_start = i
                 break
-        
         stable_region = ln_cm_smooth[stable_start:]
         ln_threshold = np.median(stable_region) if len(stable_region) > 0 else np.median(ln_cm_smooth)
         phi_threshold = np.exp(ln_threshold)
-        
         return ln_threshold, phi_threshold, stable_start
     
     def run(self, episodes=25000):
@@ -85,7 +87,6 @@ class CMAnalyzer:
         best_progress = 0
         
         for ep in range(1, episodes + 1):
-            # Reset
             self.env.reset()
             state = self.env._get_state()
             s_idx, v_idx = discretize_state(state)
@@ -96,13 +97,11 @@ class CMAnalyzer:
             episode_success = False
             max_segment = 0
             
-            # Initial action (ε-greedy)
             if np.random.rand() < self.epsilon:
                 action = np.random.randint(4)
             else:
                 action = np.argmax(self.q_curr[s_idx, v_idx])
             
-            # Episode loop
             while steps < config.MAX_STEPS_PER_EPISODE:
                 next_state_raw, reward, done, info = self.env.step(action)
                 ns_idx, nv_idx = discretize_state(next_state_raw)
@@ -110,7 +109,6 @@ class CMAnalyzer:
                 steps += 1
                 max_segment = max(max_segment, self.env.seg_idx)
                 
-                # Stuck detection
                 if self.env.seg_idx == last_segment:
                     stuck_counter += 1
                     if stuck_counter >= 1000:
@@ -119,13 +117,11 @@ class CMAnalyzer:
                     stuck_counter = 0
                     last_segment = self.env.seg_idx
                 
-                # Next action (SARSA)
                 if np.random.rand() < self.epsilon:
                     next_action = np.random.randint(4)
                 else:
                     next_action = np.argmax(self.q_curr[ns_idx, nv_idx])
                 
-                # SARSA update (Equation 27 from paper)
                 if done:
                     target = reward
                 else:
@@ -142,7 +138,6 @@ class CMAnalyzer:
                         episode_success = True
                     break
             
-            # Track success
             if episode_success:
                 success_count += 1
             self.success_history.append(episode_success)
@@ -151,7 +146,6 @@ class CMAnalyzer:
             if max_segment > best_progress:
                 best_progress = max_segment
             
-            # CM calculation (Equations 28-29 from paper)
             delta_i = np.sum(np.abs(self.q_curr - self.q_prev))
             self.delta_history.append(delta_i)
             self.q_prev = self.q_curr.copy()
@@ -167,7 +161,6 @@ class CMAnalyzer:
                 self.cm_history.append(1.0)
                 self.ln_cm_history.append(0.0)
             
-            # Print progress
             if ep % 100 == 0 or ep <= 10:
                 elapsed = time.time() - start_time
                 remaining = (episodes - ep) * (elapsed / ep)
@@ -185,20 +178,16 @@ class CMAnalyzer:
                       f"ε: {self.epsilon:.3f} | "
                       f"ETA: {rem_str}")
             
-            # Checkpoint
             if ep == 1000:
                 rate = (success_count / ep) * 100
                 print(f"\n{'='*70}")
                 print(f"📊 CHECKPOINT at Episode 1000:")
                 print(f"   Overall success: {rate:.1f}%")
                 print(f"   Best progress: {(best_progress/self.env.n_segments)*100:.1f}%")
-                
                 if best_progress < self.env.n_segments * 0.9:
-                    print(f"\n   ⚠️  Best progress < 90% - check if route is completable!")
-                    print(f"   Run diagnose_physics.py to check physics constraints.")
+                    print(f"\n   ⚠️  Best progress < 90% - physics may not be working")
                 print(f"{'='*70}\n")
         
-        # Finish
         self._finish(success_count, episodes, best_progress, start_time)
     
     def _finish(self, success_count, episodes, best_progress, start_time):
@@ -209,7 +198,6 @@ class CMAnalyzer:
         print(f"Success: {success_count}/{episodes} ({(success_count/episodes)*100:.1f}%)")
         print(f"Best progress: {best_progress}/{self.env.n_segments} ({(best_progress/self.env.n_segments)*100:.1f}%)")
         
-        # Process CM data
         ln_cm_array = np.array(self.ln_cm_history)
         ln_cm_smooth = self.smooth_curve(ln_cm_array, 100)
         ln_threshold, phi_threshold, stable_start = self.detect_threshold_from_trend(ln_cm_smooth)
@@ -220,7 +208,6 @@ class CMAnalyzer:
         print(f"  YOUR ln(φ) = {ln_threshold:.4f}")
         print(f"  YOUR φ = {phi_threshold:.4f}")
         print(f"  Paper's φ = 0.04")
-        
         print(f"\n  Use φ = {phi_threshold:.4f} in train_qsarsa.py and train_dqn.py")
         print(f"{'='*70}\n")
         
@@ -229,71 +216,54 @@ class CMAnalyzer:
     
     def _save_plot(self, ln_threshold, phi_threshold, ln_cm_smooth, stable_start):
         print("📊 Generating plots...")
-        
         ln_cm_raw = np.array(self.ln_cm_history)
         
-        # Figure 5 style plot
         fig, ax = plt.subplots(figsize=(14, 8))
-        
         ax.plot(ln_cm_smooth, linewidth=2, color='#4682B4', alpha=0.9, label='Smoothed ln(CM)')
         ax.plot(ln_cm_raw, linewidth=0.5, color='#4682B4', alpha=0.15, label='Raw')
-        
         ax.axhline(y=ln_threshold, color='red', linestyle='--', linewidth=2.5,
                    label=f'YOUR: ln(φ) = {ln_threshold:.3f} (φ = {phi_threshold:.4f})')
         ax.axhline(y=-3.21, color='green', linestyle=':', linewidth=1.5,
                    label="Paper: ln(φ) = -3.21 (φ = 0.04)")
-        
         ax.annotate('Starts failing\nto local\noptimum', 
                     xy=(len(ln_cm_smooth)*0.7, ln_threshold),
                     xytext=(len(ln_cm_smooth)*0.75, ln_threshold + 1),
                     fontsize=12, fontweight='bold',
                     bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='red'),
                     arrowprops=dict(arrowstyle='->', color='red', lw=2))
-        
         ax.set_xlabel('Iteration', fontsize=14, fontweight='bold')
         ax.set_ylabel('Ln(ΔQi/ΔQi-1)', fontsize=14, fontweight='bold')
         ax.set_title(f'Figure 5: CM Analysis\nYOUR φ = {phi_threshold:.4f}', fontsize=16, fontweight='bold')
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=10)
         ax.set_ylim([min(min(ln_cm_smooth)-0.5, -4), max(max(ln_cm_smooth)+0.5, 2)])
-        
         plt.tight_layout()
         plt.savefig(os.path.join(config.OUTPUT_DIR, "cm_plot_figure5.png"), dpi=300)
         plt.close()
         print(f"✓ Figure 5 saved")
         
-        # Detailed plot
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        
-        # ln(CM)
         axes[0,0].plot(ln_cm_smooth, linewidth=2, color='blue')
         axes[0,0].axhline(y=ln_threshold, color='red', linestyle='--')
-        axes[0,0].set_title('ln(CM) - Convergence Measurement')
-        axes[0,0].set_xlabel('Episode')
+        axes[0,0].set_title('ln(CM)')
         axes[0,0].grid(True, alpha=0.3)
         
-        # Success rate
         if self.success_history:
             cumulative = np.cumsum(self.success_history) / np.arange(1, len(self.success_history)+1) * 100
             axes[0,1].plot(cumulative, color='green', linewidth=2)
         axes[0,1].set_title('Success Rate (%)')
-        axes[0,1].set_xlabel('Episode')
         axes[0,1].grid(True, alpha=0.3)
         
-        # Delta (Q-table change)
         axes[1,0].plot(self.delta_history, alpha=0.7)
-        axes[1,0].set_title('ΔQ (Q-table change per episode)')
-        axes[1,0].set_xlabel('Episode')
+        axes[1,0].set_title('ΔQ')
         axes[1,0].grid(True, alpha=0.3)
         
-        # Progress
         if self.episode_max_progress:
             progress = [(s/self.env.n_segments)*100 for s in self.episode_max_progress]
             axes[1,1].plot(progress, alpha=0.7, color='purple')
             axes[1,1].axhline(y=100, color='red', linestyle='--')
             axes[1,1].set_ylim([0, 105])
-        axes[1,1].set_title('Max Progress per Episode (%)')
-        axes[1,1].set_xlabel('Episode')
+        axes[1,1].set_title('Max Progress (%)')
         axes[1,1].grid(True, alpha=0.3)
         
         plt.tight_layout()
@@ -303,7 +273,6 @@ class CMAnalyzer:
     
     def _save_data(self, ln_threshold, phi_threshold, success_count, episodes, best_progress):
         print("💾 Saving data...")
-        
         np.savez(os.path.join(config.OUTPUT_DIR, "cm_data.npz"),
                  ln_cm_history=np.array(self.ln_cm_history),
                  cm_history=np.array(self.cm_history),
@@ -317,21 +286,11 @@ class CMAnalyzer:
             f.write("="*70 + "\n")
             f.write("CM ANALYSIS SUMMARY\n")
             f.write("="*70 + "\n\n")
-            f.write(f"Route: {self.env.n_segments} segments ({self.env.n_segments * config.DX / 1000:.1f} km)\n")
-            f.write(f"Episodes: {episodes}\n")
-            f.write(f"Learning rate: α = {self.alpha}\n")
-            f.write(f"Discount factor: γ = {self.gamma}\n")
-            f.write(f"Exploration: ε = {self.epsilon}\n\n")
+            f.write(f"Route: {self.env.n_segments} segments\n")
+            f.write(f"Episodes: {episodes}\n\n")
             f.write(f"Success: {success_count}/{episodes} ({(success_count/episodes)*100:.1f}%)\n")
-            f.write(f"Best progress: {best_progress}/{self.env.n_segments} ({(best_progress/self.env.n_segments)*100:.1f}%)\n\n")
+            f.write(f"Best progress: {best_progress}/{self.env.n_segments}\n\n")
             f.write(f"YOUR φ = {phi_threshold:.4f}\n")
             f.write(f"YOUR ln(φ) = {ln_threshold:.4f}\n\n")
-            f.write(f"Paper's φ = 0.04\n\n")
-            f.write("="*70 + "\n")
-            f.write("NEXT STEPS:\n")
-            f.write("="*70 + "\n")
-            f.write(f"Use φ = {phi_threshold:.4f} in:\n")
-            f.write(f"  - train_qsarsa.py\n")
-            f.write(f"  - train_dqn.py\n")
-        
+            f.write(f"Paper's φ = 0.04\n")
         print("✓ Data saved")
