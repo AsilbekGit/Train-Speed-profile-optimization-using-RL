@@ -1,5 +1,5 @@
 import numpy as np
-import config
+import env_settings.config
 
 class TrainEnv:
     """
