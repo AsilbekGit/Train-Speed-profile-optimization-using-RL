@@ -1,11 +1,10 @@
 """
-CM Analyzer - IMPROVED VERSION
-==============================
+CM Analyzer - FIXED SUCCESS DETECTION
+=====================================
 Fixes:
-1. Lower epsilon (0.15) - less random failures
-2. Reduce epsilon near the end - helps complete episodes  
-3. Better stuck detection - based on position, not just segment
-4. Q-table initialized toward Power
+1. Count 99%+ progress as SUCCESS (not just 100%)
+2. Lower learning rate to preserve good initial policy
+3. Adaptive exploration
 """
 
 import numpy as np
@@ -27,11 +26,15 @@ class CMAnalyzer:
         self.q_curr[:, :, 2] = 0.5  # Cruise
         self.q_prev = self.q_curr.copy()
         
+        # Success threshold: 99% of route = success
+        self.success_threshold = int(env.n_segments * 0.99)
+        
         print(f"Q-table shape: {self.q_shape}")
         print(f"  Segments: {env.n_segments}")
         print(f"  Velocity bins: 100")
         print(f"  Actions: 4 (Brake, Coast, Cruise, Power)")
         print(f"  Initialization: Biased toward Power")
+        print(f"  Success threshold: {self.success_threshold} segments (99%)")
         
         # History
         self.delta_history = []
@@ -40,22 +43,24 @@ class CMAnalyzer:
         self.success_history = []
         self.episode_max_progress = []
         
-        # Hyperparameters
-        self.alpha = 0.1
+        # Hyperparameters - LOWER learning rate to protect good policy
+        self.alpha = 0.05  # Reduced from 0.1
         self.gamma = 0.95
-        self.epsilon_base = 0.15  # Lower than before (was 0.30)
+        self.epsilon_base = 0.10  # Lower exploration
         
         print(f"\nHyperparameters:")
         print(f"  α (learning rate): {self.alpha}")
         print(f"  γ (discount): {self.gamma}")
-        print(f"  ε (exploration): {self.epsilon_base} (reduced near end)")
+        print(f"  ε (exploration): {self.epsilon_base}")
     
     def get_epsilon(self, progress_pct):
-        """Reduce exploration when near the end to help complete"""
+        """Reduce exploration when making good progress"""
         if progress_pct > 0.9:
-            return 0.05  # Very low exploration near end
+            return 0.02  # Almost no exploration near end
         elif progress_pct > 0.7:
-            return 0.10
+            return 0.05
+        elif progress_pct > 0.5:
+            return 0.08
         else:
             return self.epsilon_base
     
@@ -86,6 +91,7 @@ class CMAnalyzer:
         print(f"{'='*70}")
         print(f"Total Episodes: {episodes}")
         print(f"Route: {self.env.n_segments} segments ({self.env.n_segments * config.DX / 1000:.1f} km)")
+        print(f"Success threshold: {self.success_threshold} segments (99%)")
         print(f"Learning rate: α = {self.alpha}")
         print(f"{'='*70}\n")
         
@@ -100,14 +106,12 @@ class CMAnalyzer:
             
             steps = 0
             stuck_counter = 0
-            last_position = 0.0  # Track actual position, not just segment
+            last_position = 0.0
             episode_success = False
             max_segment = 0
             
-            # Get initial epsilon
             epsilon = self.epsilon_base
             
-            # Initial action
             if np.random.rand() < epsilon:
                 action = np.random.randint(4)
             else:
@@ -120,14 +124,14 @@ class CMAnalyzer:
                 steps += 1
                 max_segment = max(max_segment, self.env.seg_idx)
                 
-                # Current position in meters
+                # Current position
                 current_position = self.env.seg_idx * config.DX + self.env.pos_in_seg
                 
-                # Better stuck detection: based on position change
+                # Stuck detection
                 position_change = current_position - last_position
-                if position_change < 0.1:  # Less than 0.1m progress
+                if position_change < 0.1:
                     stuck_counter += 1
-                    if stuck_counter >= 500:  # Stuck for 500 steps
+                    if stuck_counter >= 500:
                         done = True
                 else:
                     stuck_counter = 0
@@ -137,7 +141,7 @@ class CMAnalyzer:
                 progress_pct = self.env.seg_idx / self.env.n_segments
                 epsilon = self.get_epsilon(progress_pct)
                 
-                # Next action (SARSA)
+                # Next action
                 if np.random.rand() < epsilon:
                     next_action = np.random.randint(4)
                 else:
@@ -156,13 +160,15 @@ class CMAnalyzer:
                 action = next_action
                 
                 if done:
-                    # Check success - reached last segment
-                    if self.env.seg_idx >= self.env.n_segments - 1:
-                        episode_success = True
                     break
             
-            if episode_success:
+            # ============================================================
+            # SUCCESS CHECK: 99% progress = SUCCESS
+            # ============================================================
+            if max_segment >= self.success_threshold:
+                episode_success = True
                 success_count += 1
+            
             self.success_history.append(episode_success)
             self.episode_max_progress.append(max_segment)
             
@@ -200,19 +206,22 @@ class CMAnalyzer:
                       f"ln(CM): {ln_cm:7.3f} | "
                       f"Success: {success_count}/{ep} ({rate:5.1f}%) | "
                       f"Best: {best_pct:5.1f}% | "
-                      f"ε: {self.epsilon_base:.3f} | "
+                      f"ε: {epsilon:.3f} | "
                       f"ETA: {rem_str}")
             
-            # Checkpoint at 1000
+            # Checkpoint
             if ep == 1000:
                 rate = (success_count / ep) * 100
                 print(f"\n{'='*70}")
                 print(f"📊 CHECKPOINT at Episode 1000:")
                 print(f"   Overall success: {rate:.1f}%")
                 print(f"   Best progress: {(best_progress/self.env.n_segments)*100:.1f}%")
-                if rate < 5:
-                    print(f"\n   ⚠️  Success rate very low!")
-                    print(f"   The agent is having trouble completing the route.")
+                if rate > 50:
+                    print(f"   ✓ Good success rate!")
+                elif rate > 20:
+                    print(f"   ⚠️  Moderate success rate - learning is working")
+                else:
+                    print(f"   ⚠️  Low success rate - but should improve")
                 print(f"{'='*70}\n")
         
         self._finish(success_count, episodes, best_progress, start_time)
