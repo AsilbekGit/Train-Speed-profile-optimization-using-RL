@@ -1,8 +1,11 @@
 """
-CM Analyzer - FIXED Q-table Initialization
-==========================================
-Problem: Q-table starts at zeros → argmax returns 0 (Brake) → train stops
-Fix: Initialize with bias toward Power action
+CM Analyzer - IMPROVED VERSION
+==============================
+Fixes:
+1. Lower epsilon (0.15) - less random failures
+2. Reduce epsilon near the end - helps complete episodes  
+3. Better stuck detection - based on position, not just segment
+4. Q-table initialized toward Power
 """
 
 import numpy as np
@@ -18,22 +21,17 @@ class CMAnalyzer:
         self.env = env
         self.q_shape = (env.n_segments, 100, 4)
         
-        # ============================================================
-        # FIX: Initialize Q-table with bias toward POWER action
-        # ============================================================
-        # Actions: 0=Brake, 1=Coast, 2=Cruise, 3=Power
-        # If all zeros, argmax returns 0 (Brake) → train stops!
+        # Initialize Q-table with bias toward Power action
         self.q_curr = np.zeros(self.q_shape)
-        self.q_curr[:, :, 3] = 1.0  # Bias toward Power action
-        self.q_curr[:, :, 2] = 0.5  # Second choice: Cruise
-        
+        self.q_curr[:, :, 3] = 1.0  # Power
+        self.q_curr[:, :, 2] = 0.5  # Cruise
         self.q_prev = self.q_curr.copy()
         
         print(f"Q-table shape: {self.q_shape}")
         print(f"  Segments: {env.n_segments}")
         print(f"  Velocity bins: 100")
         print(f"  Actions: 4 (Brake, Coast, Cruise, Power)")
-        print(f"  Initialization: Biased toward Power action")
+        print(f"  Initialization: Biased toward Power")
         
         # History
         self.delta_history = []
@@ -42,15 +40,24 @@ class CMAnalyzer:
         self.success_history = []
         self.episode_max_progress = []
         
-        # Fixed hyperparameters
+        # Hyperparameters
         self.alpha = 0.1
         self.gamma = 0.95
-        self.epsilon = 0.3  # Higher exploration
+        self.epsilon_base = 0.15  # Lower than before (was 0.30)
         
         print(f"\nHyperparameters:")
         print(f"  α (learning rate): {self.alpha}")
         print(f"  γ (discount): {self.gamma}")
-        print(f"  ε (exploration): {self.epsilon}")
+        print(f"  ε (exploration): {self.epsilon_base} (reduced near end)")
+    
+    def get_epsilon(self, progress_pct):
+        """Reduce exploration when near the end to help complete"""
+        if progress_pct > 0.9:
+            return 0.05  # Very low exploration near end
+        elif progress_pct > 0.7:
+            return 0.10
+        else:
+            return self.epsilon_base
     
     def smooth_curve(self, data, window_size=100):
         if len(data) < window_size:
@@ -93,11 +100,15 @@ class CMAnalyzer:
             
             steps = 0
             stuck_counter = 0
-            last_segment = 0
+            last_position = 0.0  # Track actual position, not just segment
             episode_success = False
             max_segment = 0
             
-            if np.random.rand() < self.epsilon:
+            # Get initial epsilon
+            epsilon = self.epsilon_base
+            
+            # Initial action
+            if np.random.rand() < epsilon:
                 action = np.random.randint(4)
             else:
                 action = np.argmax(self.q_curr[s_idx, v_idx])
@@ -109,19 +120,30 @@ class CMAnalyzer:
                 steps += 1
                 max_segment = max(max_segment, self.env.seg_idx)
                 
-                if self.env.seg_idx == last_segment:
+                # Current position in meters
+                current_position = self.env.seg_idx * config.DX + self.env.pos_in_seg
+                
+                # Better stuck detection: based on position change
+                position_change = current_position - last_position
+                if position_change < 0.1:  # Less than 0.1m progress
                     stuck_counter += 1
-                    if stuck_counter >= 1000:
+                    if stuck_counter >= 500:  # Stuck for 500 steps
                         done = True
                 else:
                     stuck_counter = 0
-                    last_segment = self.env.seg_idx
+                last_position = current_position
                 
-                if np.random.rand() < self.epsilon:
+                # Update epsilon based on progress
+                progress_pct = self.env.seg_idx / self.env.n_segments
+                epsilon = self.get_epsilon(progress_pct)
+                
+                # Next action (SARSA)
+                if np.random.rand() < epsilon:
                     next_action = np.random.randint(4)
                 else:
                     next_action = np.argmax(self.q_curr[ns_idx, nv_idx])
                 
+                # SARSA update
                 if done:
                     target = reward
                 else:
@@ -134,6 +156,7 @@ class CMAnalyzer:
                 action = next_action
                 
                 if done:
+                    # Check success - reached last segment
                     if self.env.seg_idx >= self.env.n_segments - 1:
                         episode_success = True
                     break
@@ -146,6 +169,7 @@ class CMAnalyzer:
             if max_segment > best_progress:
                 best_progress = max_segment
             
+            # CM calculation
             delta_i = np.sum(np.abs(self.q_curr - self.q_prev))
             self.delta_history.append(delta_i)
             self.q_prev = self.q_curr.copy()
@@ -161,6 +185,7 @@ class CMAnalyzer:
                 self.cm_history.append(1.0)
                 self.ln_cm_history.append(0.0)
             
+            # Print progress
             if ep % 100 == 0 or ep <= 10:
                 elapsed = time.time() - start_time
                 remaining = (episodes - ep) * (elapsed / ep)
@@ -175,17 +200,19 @@ class CMAnalyzer:
                       f"ln(CM): {ln_cm:7.3f} | "
                       f"Success: {success_count}/{ep} ({rate:5.1f}%) | "
                       f"Best: {best_pct:5.1f}% | "
-                      f"ε: {self.epsilon:.3f} | "
+                      f"ε: {self.epsilon_base:.3f} | "
                       f"ETA: {rem_str}")
             
+            # Checkpoint at 1000
             if ep == 1000:
                 rate = (success_count / ep) * 100
                 print(f"\n{'='*70}")
                 print(f"📊 CHECKPOINT at Episode 1000:")
                 print(f"   Overall success: {rate:.1f}%")
                 print(f"   Best progress: {(best_progress/self.env.n_segments)*100:.1f}%")
-                if best_progress < self.env.n_segments * 0.9:
-                    print(f"\n   ⚠️  Best progress < 90% - physics may not be working")
+                if rate < 5:
+                    print(f"\n   ⚠️  Success rate very low!")
+                    print(f"   The agent is having trouble completing the route.")
                 print(f"{'='*70}\n")
         
         self._finish(success_count, episodes, best_progress, start_time)
