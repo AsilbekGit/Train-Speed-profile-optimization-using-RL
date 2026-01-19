@@ -1,7 +1,20 @@
 """
 Train Q-SARSA Algorithm
-Run this AFTER completing CM analysis to find YOUR φ value
+=======================
+Run this AFTER CM analysis to train with your φ value
+
+Usage:
+    python train_qsarsa.py
+    
+    Or with custom phi:
+    python train_qsarsa.py --phi 0.10 --episodes 5000
 """
+
+import sys
+import os
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.utils import load_data
 from env_settings.physics import TrainPhysics
@@ -13,6 +26,16 @@ def main():
     print("Q-SARSA TRAINING")
     print("="*70)
     
+    # Parse command line args
+    phi = 0.10  # Default
+    episodes = 5000
+    
+    for i, arg in enumerate(sys.argv):
+        if arg == '--phi' and i+1 < len(sys.argv):
+            phi = float(sys.argv[i+1])
+        if arg == '--episodes' and i+1 < len(sys.argv):
+            episodes = int(sys.argv[i+1])
+    
     # 1. Load data
     print("\n1. Loading route data...")
     grades, limits, curves = load_data()
@@ -22,39 +45,31 @@ def main():
     physics = TrainPhysics()
     env = TrainEnv(physics, grades, limits, curves)
     
-    # 3. Set YOUR φ value from CM analysis
-    # IMPORTANT: Replace this with YOUR φ from cm_summary.txt!
-    print("\n3. Setting φ threshold...")
-    print("   ⚠️  IMPORTANT: Use YOUR φ value from CM analysis!")
-    print("   Check results_cm/cm_summary.txt for suggested φ")
-    
-    # Example: If your CM analysis showed median = 0.067, use that
-    YOUR_PHI = 0.04  # CHANGE THIS to your actual φ value!
-    
-    print(f"   Using φ = {YOUR_PHI}")
-    confirm = input("   Is this correct? (y/n): ")
-    
-    if confirm.lower() != 'y':
-        try:
-            YOUR_PHI = float(input("   Enter YOUR φ value: "))
-        except:
-            print("   Invalid input, using default 0.04")
-            YOUR_PHI = 0.04
+    # 3. Set φ value
+    print(f"\n3. Using φ = {phi}")
+    print("   (Change with: python train_qsarsa.py --phi 0.05)")
     
     # 4. Initialize Q-SARSA
     print("\n4. Initializing Q-SARSA...")
-    qsarsa = QSARSA(env, phi_threshold=YOUR_PHI)
+    qsarsa = QSARSA(env, phi_threshold=phi)
     
     # 5. Train
-    print("\n5. Starting training...")
-    episodes = 1000  # Adjust as needed
-    qsarsa.train(episodes=episodes)
+    print(f"\n5. Starting training ({episodes} episodes)...")
+    q_table = qsarsa.train(episodes=episodes)
+    
+    # 6. Generate speed profile
+    print("\n6. Generating optimal speed profile...")
+    qsarsa.generate_speed_profile()
     
     print("\n" + "="*70)
     print("TRAINING COMPLETE!")
     print("="*70)
     print(f"\nResults saved to: results_cm/qsarsa/")
-    print("Check qsarsa_training.png for performance plots")
+    print("Files:")
+    print("  - qsarsa_data.npz (Q-table and training history)")
+    print("  - qsarsa_training.png (training plots)")
+    print("  - speed_profile.npz (optimal trajectory)")
+    print("  - speed_profile.png (trajectory visualization)")
 
 if __name__ == "__main__":
     main()
