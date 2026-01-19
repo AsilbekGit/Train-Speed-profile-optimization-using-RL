@@ -1,13 +1,13 @@
 """
 Deep Q-Network - PyTorch GPU Version
 =====================================
-Uses CUDA for GPU acceleration on DGX Spark
+Uses CUDA for GPU acceleration (with CPU fallback)
 
 Requirements:
     pip install torch
 
 Key Features:
-1. Automatic GPU detection and usage
+1. Automatic GPU detection with fallback to CPU
 2. PyTorch neural network
 3. Target network with soft updates
 4. Experience replay
@@ -30,16 +30,43 @@ import torch.nn.functional as F
 from collections import deque
 import random
 
-# Check for GPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Check for GPU with compatibility test
+def get_device():
+    """Get best available device with compatibility check"""
+    if not torch.cuda.is_available():
+        print("CUDA not available, using CPU")
+        return torch.device("cpu")
+    
+    # Try to actually use the GPU
+    try:
+        # Test GPU with a simple operation
+        test_tensor = torch.zeros(1).cuda()
+        _ = test_tensor + 1
+        del test_tensor
+        torch.cuda.empty_cache()
+        
+        device = torch.device("cuda")
+        print(f"✓ GPU available and compatible: {torch.cuda.get_device_name(0)}")
+        return device
+        
+    except RuntimeError as e:
+        if "no kernel image" in str(e) or "not compatible" in str(e):
+            print(f"⚠️  GPU detected but not compatible with this PyTorch version")
+            print(f"   GPU: {torch.cuda.get_device_name(0)}")
+            print(f"   To enable GPU, install PyTorch nightly:")
+            print(f"   pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124")
+            print(f"   Falling back to CPU...")
+            return torch.device("cpu")
+        else:
+            raise e
+
+device = get_device()
 print(f"\n{'='*70}")
 print(f"PyTorch Device: {device}")
-if torch.cuda.is_available():
+if device.type == "cuda":
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"CUDA Version: {torch.version.cuda}")
     print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-else:
-    print("WARNING: No GPU detected, running on CPU")
 print(f"{'='*70}\n")
 
 
