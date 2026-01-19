@@ -1,12 +1,13 @@
 """
-Train Deep Q-Network
-====================
-Run this AFTER CM analysis to train with your φ value
+Train Deep Q-Network (GPU Version)
+==================================
+Uses PyTorch with CUDA for GPU acceleration
+
+Requirements:
+    pip install torch
 
 Usage:
     python train_dqn.py
-    
-    Or with custom phi:
     python train_dqn.py --phi 0.10 --episodes 5000
 """
 
@@ -16,14 +17,31 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Check PyTorch and GPU
+try:
+    import torch
+    print("="*70)
+    print("DEEP Q-NETWORK TRAINING (PyTorch GPU)")
+    print("="*70)
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA version: {torch.version.cuda}")
+    print("="*70)
+except ImportError:
+    print("ERROR: PyTorch not installed!")
+    print("Install with: pip install torch")
+    sys.exit(1)
+
 from data.utils import load_data
 from env_settings.physics import TrainPhysics
 from env_settings.environment import TrainEnv
-from qsarsa_dqn.dqn import DeepQNetwork
+from dqn import DeepQNetwork
 
 def main():
-    print("="*70)
-    print("DEEP Q-NETWORK TRAINING")
+    print("\n" + "="*70)
+    print("INITIALIZING DQN TRAINING")
     print("="*70)
     
     # Parse command line args
