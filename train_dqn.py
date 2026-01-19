@@ -1,13 +1,13 @@
 """
-Train Q-SARSA Algorithm
-=======================
+Train Deep Q-Network
+====================
 Run this AFTER CM analysis to train with your φ value
 
 Usage:
-    python train_qsarsa.py
+    python train_dqn.py
     
     Or with custom phi:
-    python train_qsarsa.py --phi 0.10 --episodes 5000
+    python train_dqn.py --phi 0.10 --episodes 5000
 """
 
 import sys
@@ -19,11 +19,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.utils import load_data
 from env_settings.physics import TrainPhysics
 from env_settings.environment import TrainEnv
-from qsarsa import QSARSA
+from qsarsa_dqn.dqn import DeepQNetwork
 
 def main():
     print("="*70)
-    print("Q-SARSA TRAINING")
+    print("DEEP Q-NETWORK TRAINING")
     print("="*70)
     
     # Parse command line args
@@ -47,29 +47,28 @@ def main():
     
     # 3. Set φ value
     print(f"\n3. Using φ = {phi}")
-    print("   (Change with: python train_qsarsa.py --phi 0.05)")
+    print("   (Change with: python train_dqn.py --phi 0.05)")
     
-    # 4. Initialize Q-SARSA
-    print("\n4. Initializing Q-SARSA...")
-    qsarsa = QSARSA(env, phi_threshold=phi)
+    # 4. Initialize DQN
+    print("\n4. Initializing Deep Q-Network...")
+    dqn = DeepQNetwork(env, phi_threshold=phi)
     
     # 5. Train
     print(f"\n5. Starting training ({episodes} episodes)...")
-    q_table = qsarsa.train(episodes=episodes)
+    dqn.train(episodes=episodes)
     
     # 6. Generate speed profile
     print("\n6. Generating optimal speed profile...")
-    qsarsa.generate_speed_profile()
+    dqn.generate_speed_profile()
     
     print("\n" + "="*70)
     print("TRAINING COMPLETE!")
     print("="*70)
-    print(f"\nResults saved to: results_cm/qsarsa/")
+    print(f"\nResults saved to: results_cm/deep_q/")
     print("Files:")
-    print("  - qsarsa_data.npz (Q-table and training history)")
-    print("  - qsarsa_training.png (training plots)")
+    print("  - dqn_weights.npz (network weights and history)")
+    print("  - dqn_training.png (training plots)")
     print("  - speed_profile.npz (optimal trajectory)")
-    print("  - speed_profile.png (trajectory visualization)")
 
 if __name__ == "__main__":
     main()
