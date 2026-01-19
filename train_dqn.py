@@ -37,7 +37,7 @@ except ImportError:
 from data.utils import load_data
 from env_settings.physics import TrainPhysics
 from env_settings.environment import TrainEnv
-from dqn import DeepQNetwork
+from qsarsa_dqn.dqn import DeepQNetwork
 
 def main():
     print("\n" + "="*70)
