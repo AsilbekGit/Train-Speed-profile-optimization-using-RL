@@ -1,10 +1,8 @@
 """
-CM Analyzer - FIXED SUCCESS DETECTION
-=====================================
-Fixes:
-1. Count 99%+ progress as SUCCESS (not just 100%)
-2. Lower learning rate to preserve good initial policy
-3. Adaptive exploration
+CM Analyzer - PROTECTED LEARNING
+================================
+Key Fix: Only update Q-table when episode achieves >80% progress.
+This prevents failed episodes from destroying the good initial policy.
 """
 
 import numpy as np
@@ -20,21 +18,25 @@ class CMAnalyzer:
         self.env = env
         self.q_shape = (env.n_segments, 100, 4)
         
-        # Initialize Q-table with bias toward Power action
+        # Initialize Q-table with STRONG bias toward Power
         self.q_curr = np.zeros(self.q_shape)
-        self.q_curr[:, :, 3] = 1.0  # Power
-        self.q_curr[:, :, 2] = 0.5  # Cruise
+        self.q_curr[:, :, 3] = 5.0   # Strong Power bias
+        self.q_curr[:, :, 2] = 2.0   # Cruise as second choice
+        self.q_curr[:, :, 1] = 0.5   # Coast
+        self.q_curr[:, :, 0] = -1.0  # Discourage Brake
         self.q_prev = self.q_curr.copy()
         
-        # Success threshold: 99% of route = success
-        self.success_threshold = int(env.n_segments * 0.99)
+        # Thresholds
+        self.success_threshold = int(env.n_segments * 0.99)  # 99% = success
+        self.learning_threshold = int(env.n_segments * 0.80)  # Only learn from 80%+ episodes
         
         print(f"Q-table shape: {self.q_shape}")
         print(f"  Segments: {env.n_segments}")
         print(f"  Velocity bins: 100")
         print(f"  Actions: 4 (Brake, Coast, Cruise, Power)")
-        print(f"  Initialization: Biased toward Power")
+        print(f"  Initialization: STRONG Power bias")
         print(f"  Success threshold: {self.success_threshold} segments (99%)")
+        print(f"  Learning threshold: {self.learning_threshold} segments (80%)")
         
         # History
         self.delta_history = []
@@ -43,26 +45,16 @@ class CMAnalyzer:
         self.success_history = []
         self.episode_max_progress = []
         
-        # Hyperparameters - LOWER learning rate to protect good policy
-        self.alpha = 0.05  # Reduced from 0.1
+        # Hyperparameters
+        self.alpha = 0.02   # Very low learning rate
         self.gamma = 0.95
-        self.epsilon_base = 0.10  # Lower exploration
+        self.epsilon = 0.05  # Very low exploration
         
         print(f"\nHyperparameters:")
         print(f"  α (learning rate): {self.alpha}")
         print(f"  γ (discount): {self.gamma}")
-        print(f"  ε (exploration): {self.epsilon_base}")
-    
-    def get_epsilon(self, progress_pct):
-        """Reduce exploration when making good progress"""
-        if progress_pct > 0.9:
-            return 0.02  # Almost no exploration near end
-        elif progress_pct > 0.7:
-            return 0.05
-        elif progress_pct > 0.5:
-            return 0.08
-        else:
-            return self.epsilon_base
+        print(f"  ε (exploration): {self.epsilon}")
+        print(f"  Learning: Only from episodes with >80% progress")
     
     def smooth_curve(self, data, window_size=100):
         if len(data) < window_size:
@@ -83,7 +75,7 @@ class CMAnalyzer:
     
     def run(self, episodes=25000):
         print(f"\n{'='*70}")
-        print(f"CM ANALYSIS - Finding YOUR φ Threshold")
+        print(f"CM ANALYSIS - PROTECTED LEARNING")
         print(f"{'='*70}")
         print(f"Paper's methodology: Section 3.4, Figure 5")
         print(f"Paper's result: φ = 0.04 for Tehran/Shiraz Metro")
@@ -91,13 +83,14 @@ class CMAnalyzer:
         print(f"{'='*70}")
         print(f"Total Episodes: {episodes}")
         print(f"Route: {self.env.n_segments} segments ({self.env.n_segments * config.DX / 1000:.1f} km)")
-        print(f"Success threshold: {self.success_threshold} segments (99%)")
         print(f"Learning rate: α = {self.alpha}")
+        print(f"Only learning from episodes with >80% progress")
         print(f"{'='*70}\n")
         
         start_time = time.time()
         success_count = 0
         best_progress = 0
+        learned_episodes = 0  # Count episodes we actually learned from
         
         for ep in range(1, episodes + 1):
             self.env.reset()
@@ -107,12 +100,13 @@ class CMAnalyzer:
             steps = 0
             stuck_counter = 0
             last_position = 0.0
-            episode_success = False
             max_segment = 0
             
-            epsilon = self.epsilon_base
+            # Store transitions for this episode (delayed learning)
+            episode_transitions = []
             
-            if np.random.rand() < epsilon:
+            # Initial action - mostly greedy with Power bias
+            if np.random.rand() < self.epsilon:
                 action = np.random.randint(4)
             else:
                 action = np.argmax(self.q_curr[s_idx, v_idx])
@@ -124,10 +118,8 @@ class CMAnalyzer:
                 steps += 1
                 max_segment = max(max_segment, self.env.seg_idx)
                 
-                # Current position
-                current_position = self.env.seg_idx * config.DX + self.env.pos_in_seg
-                
                 # Stuck detection
+                current_position = self.env.seg_idx * config.DX + self.env.pos_in_seg
                 position_change = current_position - last_position
                 if position_change < 0.1:
                     stuck_counter += 1
@@ -137,24 +129,18 @@ class CMAnalyzer:
                     stuck_counter = 0
                 last_position = current_position
                 
-                # Update epsilon based on progress
-                progress_pct = self.env.seg_idx / self.env.n_segments
-                epsilon = self.get_epsilon(progress_pct)
-                
                 # Next action
-                if np.random.rand() < epsilon:
+                if np.random.rand() < self.epsilon:
                     next_action = np.random.randint(4)
                 else:
                     next_action = np.argmax(self.q_curr[ns_idx, nv_idx])
                 
-                # SARSA update
-                if done:
-                    target = reward
-                else:
-                    target = reward + self.gamma * self.q_curr[ns_idx, nv_idx, next_action]
-                
-                old_q = self.q_curr[s_idx, v_idx, action]
-                self.q_curr[s_idx, v_idx, action] += self.alpha * (target - old_q)
+                # Store transition (don't update yet!)
+                episode_transitions.append({
+                    's_idx': s_idx, 'v_idx': v_idx, 'action': action,
+                    'reward': reward, 'ns_idx': ns_idx, 'nv_idx': nv_idx,
+                    'next_action': next_action, 'done': done
+                })
                 
                 s_idx, v_idx = ns_idx, nv_idx
                 action = next_action
@@ -163,10 +149,23 @@ class CMAnalyzer:
                     break
             
             # ============================================================
-            # SUCCESS CHECK: 99% progress = SUCCESS
+            # PROTECTED LEARNING: Only update Q if episode was good
             # ============================================================
-            if max_segment >= self.success_threshold:
-                episode_success = True
+            if max_segment >= self.learning_threshold:
+                learned_episodes += 1
+                # Apply all transitions from this episode
+                for t in episode_transitions:
+                    if t['done']:
+                        target = t['reward']
+                    else:
+                        target = t['reward'] + self.gamma * self.q_curr[t['ns_idx'], t['nv_idx'], t['next_action']]
+                    
+                    old_q = self.q_curr[t['s_idx'], t['v_idx'], t['action']]
+                    self.q_curr[t['s_idx'], t['v_idx'], t['action']] += self.alpha * (target - old_q)
+            
+            # Check success
+            episode_success = max_segment >= self.success_threshold
+            if episode_success:
                 success_count += 1
             
             self.success_history.append(episode_success)
@@ -201,37 +200,43 @@ class CMAnalyzer:
                 ln_cm = self.ln_cm_history[-1]
                 best_pct = (best_progress / self.env.n_segments) * 100
                 rate = (success_count / ep) * 100
+                learn_rate = (learned_episodes / ep) * 100
                 
                 print(f"{marker} Ep {ep:05d}/{episodes} | "
                       f"ln(CM): {ln_cm:7.3f} | "
                       f"Success: {success_count}/{ep} ({rate:5.1f}%) | "
+                      f"Learned: {learn_rate:5.1f}% | "
                       f"Best: {best_pct:5.1f}% | "
-                      f"ε: {epsilon:.3f} | "
                       f"ETA: {rem_str}")
             
             # Checkpoint
             if ep == 1000:
                 rate = (success_count / ep) * 100
+                learn_rate = (learned_episodes / ep) * 100
                 print(f"\n{'='*70}")
                 print(f"📊 CHECKPOINT at Episode 1000:")
                 print(f"   Overall success: {rate:.1f}%")
+                print(f"   Episodes learned from: {learn_rate:.1f}%")
                 print(f"   Best progress: {(best_progress/self.env.n_segments)*100:.1f}%")
                 if rate > 50:
-                    print(f"   ✓ Good success rate!")
+                    print(f"   ✓ Excellent success rate!")
                 elif rate > 20:
-                    print(f"   ⚠️  Moderate success rate - learning is working")
+                    print(f"   ✓ Good success rate!")
+                elif rate > 5:
+                    print(f"   ⚠️  Moderate success rate")
                 else:
-                    print(f"   ⚠️  Low success rate - but should improve")
+                    print(f"   ⚠️  Low success rate - but protected learning should help")
                 print(f"{'='*70}\n")
         
-        self._finish(success_count, episodes, best_progress, start_time)
+        self._finish(success_count, episodes, best_progress, learned_episodes, start_time)
     
-    def _finish(self, success_count, episodes, best_progress, start_time):
+    def _finish(self, success_count, episodes, best_progress, learned_episodes, start_time):
         print(f"\n{'='*70}")
         print(f"CM ANALYSIS COMPLETE")
         print(f"{'='*70}")
         print(f"Time: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))}")
         print(f"Success: {success_count}/{episodes} ({(success_count/episodes)*100:.1f}%)")
+        print(f"Learned from: {learned_episodes}/{episodes} ({(learned_episodes/episodes)*100:.1f}%)")
         print(f"Best progress: {best_progress}/{self.env.n_segments} ({(best_progress/self.env.n_segments)*100:.1f}%)")
         
         ln_cm_array = np.array(self.ln_cm_history)
