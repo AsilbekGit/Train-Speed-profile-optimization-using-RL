@@ -27,7 +27,7 @@ import sys
 
 # Import project modules
 try:
-    import env_settings.config
+    import env_settings.config as config
 except ImportError:
     # Fallback config
     class config:
