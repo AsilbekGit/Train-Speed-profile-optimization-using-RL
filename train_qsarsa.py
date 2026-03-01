@@ -1,72 +1,158 @@
 """
-Q-SARSA Training Script
+Train Q-SARSA Algorithm
 ========================
 Usage:
     python train_qsarsa.py
     python train_qsarsa.py --phi 0.10 --episodes 5000
 """
 
-import argparse
-import os
 import sys
+import os
 import numpy as np
+import pandas as pd
 
-# Import project modules
-try:
-    import env_settings.config as config
-    from env_settings.config import TrainPhysics, TrainEnv
-except ImportError:
-    try:
-        from env_settings.environment import TrainEnv
-        from env_settings.physics import TrainPhysics
-        import env_settings.config
-    except ImportError:
-        print("ERROR: Cannot import project modules (config, TrainPhysics, TrainEnv)")
-        print("Make sure you're running from the qsarsa_dqn/ directory")
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def load_data():
+    """
+    Load route data from data/coordinates.dat and data/data.csv
+    
+    data.csv columns: Grade (%), Speed_limit (m/s), Curvature (%)
+    coordinates.dat: node_id  x  y (whitespace separated)
+    
+    Speed_limit = 1 means station stop.
+    """
+    search_paths = [
+        'data/data.csv',
+        '../data/data.csv',
+        '../../data/data.csv',
+        os.path.join(os.path.dirname(__file__), 'data', 'data.csv'),
+        os.path.join(os.path.dirname(__file__), '..', 'data', 'data.csv'),
+    ]
+    
+    csv_path = None
+    for p in search_paths:
+        if os.path.exists(p):
+            csv_path = p
+            break
+    
+    # Try config paths
+    if csv_path is None:
+        for mod_name in ['config', 'env_settings.config']:
+            try:
+                cfg = __import__(mod_name, fromlist=['DATA_PATH'])
+                if hasattr(cfg, 'DATA_PATH') and os.path.exists(cfg.DATA_PATH):
+                    csv_path = cfg.DATA_PATH
+                    break
+            except ImportError:
+                continue
+    
+    if csv_path is None:
+        print("ERROR: Cannot find data/data.csv!")
+        print("Searched in:", search_paths)
+        print("Current directory:", os.getcwd())
+        if os.path.exists('data'):
+            print("Files in data/:", os.listdir('data'))
         sys.exit(1)
+    
+    print(f"   Loading track data from: {csv_path}")
+    df = pd.read_csv(csv_path)
+    print(f"   Columns found: {list(df.columns)}")
+    print(f"   Segments: {len(df)}")
+    
+    # Case-insensitive column lookup
+    col_map = {}
+    for c in df.columns:
+        col_map[c.lower().strip()] = c
+    
+    # Grade (%)
+    grade_key = next((k for k in col_map if 'grade' in k), None)
+    if grade_key is None:
+        print(f"ERROR: No 'Grade' column. Available: {list(df.columns)}")
+        sys.exit(1)
+    grades = df[col_map[grade_key]].values.astype(float)
+    
+    # Speed limit (m/s)
+    limit_key = next((k for k in col_map if 'speed' in k and 'limit' in k), None)
+    if limit_key is None:
+        limit_key = next((k for k in col_map if 'speed' in k), None)
+    if limit_key is None:
+        print(f"ERROR: No 'Speed_limit' column. Available: {list(df.columns)}")
+        sys.exit(1)
+    limits = df[col_map[limit_key]].values.astype(float)
+    
+    # Curvature (%)
+    curve_key = next((k for k in col_map if 'curv' in k), None)
+    if curve_key:
+        curves = df[col_map[curve_key]].values.astype(float)
+    else:
+        curves = np.zeros(len(grades))
+        print("   WARNING: No 'Curvature' column found, using zeros")
+    
+    # Load coordinates if available
+    coord_search = [p.replace('data.csv', 'coordinates.dat') for p in search_paths]
+    for p in coord_search:
+        if os.path.exists(p):
+            coords = np.loadtxt(p)
+            print(f"   Loaded {len(coords)} coordinate nodes from: {p}")
+            break
+    
+    # Summary
+    non_station = limits[limits > 1]
+    print(f"\n   Route summary:")
+    print(f"   - Segments: {len(grades)}")
+    print(f"   - Total distance: {len(grades) * 0.1:.1f} km")
+    print(f"   - Grade range: [{grades.min():.4f}%, {grades.max():.4f}%]")
+    if len(non_station) > 0:
+        print(f"   - Speed limit range: [{non_station.min():.1f}, {non_station.max():.1f}] m/s "
+              f"([{non_station.min()*3.6:.1f}, {non_station.max()*3.6:.1f}] km/h)")
+    print(f"   - Curvature range: [{curves.min():.6f}%, {curves.max():.6f}%]")
+    print(f"   - Station stops (speed_limit=1): {np.sum(limits == 1)}")
+    
+    return grades, limits, curves
 
-try:
-    from qsarsa_dqn.qsarsa import QSARSA
-except ImportError:
-    print("ERROR: Cannot import qsarsa module")
-    print("Make sure qsarsa.py is in the current directory")
+
+def get_physics_and_env(grades, limits, curves):
+    """Try different import paths to get TrainPhysics and TrainEnv."""
+    import_attempts = [
+        ('env_settings.physics', 'env_settings.environment'),
+        ('physics', 'environment'),
+    ]
+    
+    for phys_mod, env_mod in import_attempts:
+        try:
+            phys_module = __import__(phys_mod, fromlist=['TrainPhysics'])
+            env_module = __import__(env_mod, fromlist=['TrainEnv'])
+            physics = phys_module.TrainPhysics()
+            env = env_module.TrainEnv(physics, grades, limits, curves)
+            print(f"   ✓ Loaded physics/environment from {phys_mod}")
+            return physics, env
+        except (ImportError, AttributeError):
+            continue
+    
+    for mod_name in ['config', 'env_settings.config']:
+        try:
+            cfg = __import__(mod_name, fromlist=['TrainPhysics', 'TrainEnv'])
+            physics = cfg.TrainPhysics()
+            env = cfg.TrainEnv(physics, grades, limits, curves)
+            print(f"   ✓ Loaded from {mod_name}")
+            return physics, env
+        except (ImportError, AttributeError):
+            continue
+    
+    print("ERROR: Cannot import TrainPhysics/TrainEnv")
     sys.exit(1)
 
 
-def load_route_data():
-    """Load route data (grades, speed limits, curves)."""
-    for path in ['route_data.npz', 'data/route_data.npz', '../route_data.npz']:
-        if os.path.exists(path):
-            data = np.load(path, allow_pickle=True)
-            return data['grades'], data['limits'], data.get('curves', np.zeros_like(data['grades']))
-    
-    if hasattr(config, 'GRADES') and hasattr(config, 'SPEED_LIMITS'):
-        grades = np.array(config.GRADES)
-        limits = np.array(config.SPEED_LIMITS)
-        curves = np.array(getattr(config, 'CURVES', np.zeros_like(grades)))
-        return grades, limits, curves
-    
-    grade_files = ['grades.npy', 'data/grades.npy', 'grade_data.npy']
-    for gf in grade_files:
-        if os.path.exists(gf):
-            grades = np.load(gf)
-            limits = np.load(gf.replace('grade', 'speed_limit')) if os.path.exists(gf.replace('grade', 'speed_limit')) else np.full_like(grades, 120.0)
-            curves = np.load(gf.replace('grade', 'curve')) if os.path.exists(gf.replace('grade', 'curve')) else np.zeros_like(grades)
-            return grades, limits, curves
-    
-    print("WARNING: No route data found. Using default 749-segment route.")
-    n_segments = 749
-    return np.zeros(n_segments), np.full(n_segments, 120.0), np.zeros(n_segments)
-
-
 def main():
+    import argparse
     parser = argparse.ArgumentParser(description='Train Q-SARSA for speed profile optimization')
     parser.add_argument('--phi', type=float, default=0.10, help='CM threshold φ (default: 0.10)')
-    parser.add_argument('--episodes', type=int, default=5000, help='Number of training episodes (default: 5000)')
+    parser.add_argument('--episodes', type=int, default=5000, help='Training episodes (default: 5000)')
     args = parser.parse_args()
-    
-    phi = args.phi
-    episodes = args.episodes
     
     print("=" * 70)
     print("Q-SARSA TRAINING")
@@ -75,24 +161,23 @@ def main():
     
     # 1. Load route data
     print("\n1. Loading route data...")
-    grades, limits, curves = load_route_data()
-    print(f"   Route: {len(grades)} segments ({len(grades) * 0.1:.1f} km)")
+    grades, limits, curves = load_data()
     
     # 2. Initialize environment
     print("\n2. Initializing environment...")
-    physics = TrainPhysics()
-    env = TrainEnv(physics, grades, limits, curves)
+    physics, env = get_physics_and_env(grades, limits, curves)
     
     # 3. Set φ
-    print(f"\n3. Using φ = {phi}")
+    print(f"\n3. Using φ = {args.phi}")
     
     # 4. Initialize Q-SARSA
     print("\n4. Initializing Q-SARSA...")
-    agent = QSARSA(env, phi_threshold=phi)
+    from qsarsa_dqn.qsarsa import QSARSA
+    agent = QSARSA(env, phi_threshold=args.phi)
     
     # 5. Train
-    print(f"\n5. Starting training ({episodes} episodes)...")
-    agent.train(episodes=episodes)
+    print(f"\n5. Starting training ({args.episodes} episodes)...")
+    agent.train(episodes=args.episodes)
     
     # 6. Generate speed profile
     print("\n6. Generating optimal speed profile...")
@@ -101,8 +186,6 @@ def main():
     print("\n" + "=" * 70)
     print("TRAINING COMPLETE!")
     print("=" * 70)
-    output_dir = os.path.join(getattr(config, 'OUTPUT_DIR', 'results_cm'), "qsarsa")
-    print(f"\nResults saved to: {output_dir}/")
 
 
 if __name__ == "__main__":
