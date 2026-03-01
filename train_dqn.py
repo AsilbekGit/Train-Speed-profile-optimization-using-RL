@@ -1,62 +1,84 @@
 """
-Train Deep Q-Network (GPU Version)
-==================================
-Uses PyTorch with CUDA for GPU acceleration
-
-Requirements:
-    pip install torch
-
+DQN Training Script
+===================
 Usage:
     python train_dqn.py
     python train_dqn.py --phi 0.10 --episodes 5000
 """
 
-import sys
+import argparse
 import os
+import sys
+import numpy as np
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Check PyTorch and GPU
+# Import project modules
 try:
-    import torch
-    print("="*70)
-    print("DEEP Q-NETWORK TRAINING (PyTorch GPU)")
-    print("="*70)
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA version: {torch.version.cuda}")
-    print("="*70)
+    import env_settings.config as config
+    from env_settings.config import TrainPhysics, TrainEnv
 except ImportError:
-    print("ERROR: PyTorch not installed!")
-    print("Install with: pip install torch")
-    sys.exit(1)
+    try:
+        from env_settings.environment import TrainEnv
+        from env_settings.physics import TrainPhysics
+        import env_settings.config as config
+    except ImportError:
+        print("ERROR: Cannot import project modules (config, TrainPhysics, TrainEnv)")
+        print("Make sure you're running from the qsarsa_dqn/ directory")
+        sys.exit(1)
 
-from data.utils import load_data
-from env_settings.physics import TrainPhysics
-from env_settings.environment import TrainEnv
 from qsarsa_dqn.dqn import DeepQNetwork
 
+
+def load_route_data():
+    """Load route data (grades, speed limits, curves)."""
+    # Try loading from standard locations
+    for path in ['route_data.npz', 'data/route_data.npz', '../route_data.npz']:
+        if os.path.exists(path):
+            data = np.load(path, allow_pickle=True)
+            return data['grades'], data['limits'], data.get('curves', np.zeros_like(data['grades']))
+    
+    # Try loading from config
+    if hasattr(config, 'GRADES') and hasattr(config, 'SPEED_LIMITS'):
+        grades = np.array(config.GRADES)
+        limits = np.array(config.SPEED_LIMITS)
+        curves = np.array(getattr(config, 'CURVES', np.zeros_like(grades)))
+        return grades, limits, curves
+    
+    # Try loading individual files
+    grade_files = ['grades.npy', 'data/grades.npy', 'grade_data.npy']
+    for gf in grade_files:
+        if os.path.exists(gf):
+            grades = np.load(gf)
+            # Look for corresponding files
+            limits = np.load(gf.replace('grade', 'speed_limit')) if os.path.exists(gf.replace('grade', 'speed_limit')) else np.full_like(grades, 120.0)
+            curves = np.load(gf.replace('grade', 'curve')) if os.path.exists(gf.replace('grade', 'curve')) else np.zeros_like(grades)
+            return grades, limits, curves
+    
+    print("WARNING: No route data found. Using default 749-segment route.")
+    n_segments = 749
+    grades = np.zeros(n_segments)
+    limits = np.full(n_segments, 120.0)
+    curves = np.zeros(n_segments)
+    return grades, limits, curves
+
+
 def main():
-    print("\n" + "="*70)
-    print("INITIALIZING DQN TRAINING")
-    print("="*70)
+    parser = argparse.ArgumentParser(description='Train Deep Q-Network for speed profile optimization')
+    parser.add_argument('--phi', type=float, default=0.10, help='CM threshold φ (default: 0.10)')
+    parser.add_argument('--episodes', type=int, default=5000, help='Number of training episodes (default: 5000)')
+    args = parser.parse_args()
     
-    # Parse command line args
-    phi = 0.10  # Default
-    episodes = 5000
+    phi = args.phi
+    episodes = args.episodes
     
-    for i, arg in enumerate(sys.argv):
-        if arg == '--phi' and i+1 < len(sys.argv):
-            phi = float(sys.argv[i+1])
-        if arg == '--episodes' and i+1 < len(sys.argv):
-            episodes = int(sys.argv[i+1])
+    print("=" * 70)
+    print("DEEP Q-NETWORK TRAINING")
+    print("Train Speed Profile Optimization")
+    print("=" * 70)
     
-    # 1. Load data
+    # 1. Load route data
     print("\n1. Loading route data...")
-    grades, limits, curves = load_data()
+    grades, limits, curves = load_route_data()
+    print(f"   Route: {len(grades)} segments ({len(grades) * 0.1:.1f} km)")
     
     # 2. Initialize physics and environment
     print("\n2. Initializing environment...")
@@ -79,14 +101,17 @@ def main():
     print("\n6. Generating optimal speed profile...")
     dqn.generate_speed_profile()
     
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("TRAINING COMPLETE!")
-    print("="*70)
-    print(f"\nResults saved to: results_cm/deep_q/")
+    print("=" * 70)
+    output_dir = os.path.join(getattr(config, 'OUTPUT_DIR', 'results_cm'), "deep_q")
+    print(f"\nResults saved to: {output_dir}/")
     print("Files:")
     print("  - dqn_weights.npz (network weights and history)")
     print("  - dqn_training.png (training plots)")
     print("  - speed_profile.npz (optimal trajectory)")
+    print("  - speed_profile.png (speed profile visualization)")
+
 
 if __name__ == "__main__":
     main()
