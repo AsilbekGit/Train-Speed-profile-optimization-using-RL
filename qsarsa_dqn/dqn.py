@@ -22,7 +22,7 @@ from multiprocessing import Pool, cpu_count
 
 # Import project modules
 try:
-    import env_settings.config 
+    import env_settings.config as config
 except ImportError:
     class config:
         OUTPUT_DIR = "results_cm"
