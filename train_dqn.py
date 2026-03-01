@@ -170,13 +170,12 @@ def main():
     parser = argparse.ArgumentParser(description='Train DQN for speed profile optimization')
     parser.add_argument('--phi', type=float, default=0.10, help='CM threshold φ (default: 0.10)')
     parser.add_argument('--episodes', type=int, default=5000, help='Training episodes (default: 5000)')
-    parser.add_argument('--workers', type=int, default=None, help='Number of parallel workers (default: all cores)')
     args = parser.parse_args()
     
     print("=" * 70)
-    print("DEEP Q-NETWORK TRAINING (PARALLELIZED)")
+    print("DEEP Q-NETWORK TRAINING")
     print("Train Speed Profile Optimization")
-    print(f"NumPy threads: {n_cores} | Workers: {args.workers or 'auto'}")
+    print(f"NumPy threads: {n_cores}")
     print("=" * 70)
     
     # 1. Load route data
@@ -193,10 +192,7 @@ def main():
     # 4. Initialize DQN
     print("\n4. Initializing Deep Q-Network...")
     from qsarsa_dqn.dqn import DeepQNetwork
-    dqn = DeepQNetwork(env, phi_threshold=args.phi, n_workers=args.workers)
-    
-    # Explicitly set route data for parallel workers
-    dqn._env_args = (grades, limits, curves)
+    dqn = DeepQNetwork(env, phi_threshold=args.phi)
     
     # 5. Train
     print(f"\n5. Starting training ({args.episodes} episodes)...")
