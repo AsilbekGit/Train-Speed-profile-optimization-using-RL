@@ -74,10 +74,12 @@ class DeepQNetwork:
         n_segments = getattr(env, 'n_segments', 749)
         n_speeds = 50
         self.q_table = np.zeros((n_segments, n_speeds, self.n_actions))
-        self.q_table[:, :, 0] = 2.0
-        self.q_table[:, :, 1] = 1.0
-        self.q_table[:, :, 2] = 0.0
-        self.q_table[:, :, 3] = -1.0
+        # More balanced initialization (old: Power=2, Cruise=1, Coast=0, Brake=-1)
+        # New: encourage coasting and cruising, not just full power
+        self.q_table[:, :, 0] = 1.0   # Power: still positive but not dominant
+        self.q_table[:, :, 1] = 1.2   # Cruise: slightly preferred (energy-efficient)
+        self.q_table[:, :, 2] = 0.8   # Coast: close to cruise (zero energy)
+        self.q_table[:, :, 3] = -0.5  # Brake: still discouraged but less harshly
         self.prev_q_table = self.q_table.copy()
         
         self.cm_history = []
@@ -115,7 +117,8 @@ class DeepQNetwork:
             weights[f'W{i}'] = np.random.randn(fan_in, fan_out) * std
             weights[f'b{i}'] = np.zeros(fan_out)
         last_idx = len(layer_sizes) - 2
-        weights[f'b{last_idx}'] = np.array([2.0, 1.0, 0.0, -1.0])
+        # Balanced bias: Cruise/Coast preferred over Power for energy efficiency
+        weights[f'b{last_idx}'] = np.array([0.5, 1.0, 0.8, -0.3])
         return weights
     
     def _deep_copy_weights(self, weights):
@@ -261,24 +264,100 @@ class DeepQNetwork:
         return int(np.clip(velocity / v_max * (n_bins - 1), 0, n_bins - 1))
     
     # =====================================================
-    # Reward Function (Equation 45)
+    # =====================================================
+    # Reward Function (Energy-Optimized)
     # =====================================================
     
     def compute_reward(self, info, done):
-        delta_coeff = 0.5
-        rho_coeff = 0.5
-        R_end = 100.0
+        """
+        Energy-focused reward function.
+        
+        Math: 2325 kWh / ~2400 steps = ~0.97 kWh/step average.
+        Progress per step ≈ 1/749 ≈ 0.00134.
+        
+        Strategy: 
+        - Strong energy penalty so agent prefers coast/brake over power
+        - Bonus for coasting at good speed (energy-free distance)
+        - Penalize powering when train is already at good speed
+        - Energy-scaled completion bonus
+        """
         C_penalty = 10.0
         
         if done and info.get('completed', False):
-            reward = R_end
+            # Energy-scaled completion bonus
+            total_energy = info.get('total_energy', 0)
+            if total_energy <= 0:
+                total_energy = getattr(self.env, 'energy_kwh', 2500)
+            
+            # Baseline: 2300 kWh (current). Target: <1800 kWh
+            # At 2300 → reward=30, at 1800 → reward=55, at 1500 → reward=70
+            energy_bonus = max(0, (2500 - total_energy) / 10.0)
+            reward = 30.0 + energy_bonus
+            
         elif info.get('violation', False) or info.get('backward', False):
             reward = -C_penalty
         else:
-            dt = info.get('dt', 1.0)
-            energy = info.get('energy_step', 0.0)
+            energy_step = info.get('energy_step', 0.0)  # kWh this step
             progress = info.get('progress', 0.0)
-            reward = progress * 10.0 - delta_coeff * dt * 0.01 - rho_coeff * energy * 0.001
+            action = info.get('action', -1)
+            
+            # Current state
+            current_v = getattr(self.env, 'v', 0)
+            seg_idx = min(self.env.seg_idx, 748) if hasattr(self.env, 'seg_idx') else 0
+            grade = self.env.grades[seg_idx] if hasattr(self.env, 'grades') else 0.0
+            
+            # Get speed limit at current segment
+            limit = 22.0  # default m/s
+            if hasattr(self.env, 'limits'):
+                lim_val = self.env.limits[seg_idx] if seg_idx < len(self.env.limits) else 22.0
+                limit = lim_val if lim_val > 1 else 22.0  # ignore station markers
+            
+            speed_ratio = current_v / max(limit, 1.0)  # 0 to 1+
+            
+            # === 1. PROGRESS REWARD (small, just enough to move forward) ===
+            progress_reward = progress * 3.0
+            
+            # === 2. ENERGY PENALTY (dominant signal) ===
+            # ~0.97 kWh/step → penalty ≈ 0.049 vs progress ≈ 0.004
+            # This makes energy 12x more important than progress
+            energy_penalty = energy_step * 0.05
+            
+            # === 3. SPEED-AWARE ACTION BONUS ===
+            action_bonus = 0.0
+            
+            if grade < -1.0:
+                # DOWNHILL: gravity provides free acceleration
+                if action == 2:      # Coast (best: free energy from gravity)
+                    action_bonus = 0.02
+                elif action == 3:    # Brake (ok: may need to control speed)
+                    action_bonus = 0.01
+                elif action == 0:    # Power (wasteful on downhill!)
+                    action_bonus = -0.03
+                    
+            elif grade < 0.5:
+                # FLAT or slight downhill: coast if at good speed
+                if speed_ratio > 0.5:
+                    if action == 2:      # Coast at good speed = excellent
+                        action_bonus = 0.015
+                    elif action == 1:    # Cruise = ok
+                        action_bonus = 0.005
+                    elif action == 0:    # Power when already fast = wasteful
+                        action_bonus = -0.01
+                        
+            else:
+                # UPHILL: power is necessary but reward efficiency
+                if action == 0 and speed_ratio < 0.3:
+                    action_bonus = 0.005  # Need power when slow on uphill
+            
+            # === 4. EFFICIENT SPEED BONUS ===
+            # Reward maintaining 60-85% of speed limit (energy-efficient range)
+            speed_bonus = 0.0
+            if 0.6 <= speed_ratio <= 0.85:
+                speed_bonus = 0.005  # Sweet spot for energy efficiency
+            elif speed_ratio > 0.95:
+                speed_bonus = -0.005  # Near limit = likely wasting energy
+            
+            reward = progress_reward - energy_penalty + action_bonus + speed_bonus
         
         return reward * self.reward_scale
     
@@ -398,6 +477,7 @@ class DeepQNetwork:
             done = False
             steps = 0
             cm = self._compute_cm(ep)
+            prev_energy = 0.0  # Track energy for per-step calculation
             
             while not done and steps < getattr(config, 'MAX_STEPS_PER_EPISODE', 2000):
                 raw_state = self.env._get_state()
@@ -412,6 +492,18 @@ class DeepQNetwork:
                 
                 next_raw_state, env_reward, done, info = self.env.step(action)
                 next_state = self.normalize_state(next_raw_state)
+                
+                # Compute energy_step from environment if not in info
+                curr_energy = getattr(self.env, 'energy_kwh', 0)
+                if not isinstance(info, dict):
+                    info = {}
+                if 'energy_step' not in info:
+                    info['energy_step'] = max(0, curr_energy - prev_energy)
+                info['total_energy'] = curr_energy
+                info['action'] = action
+                info['progress'] = info.get('progress', 1.0 / max(self.env.n_segments, 1))
+                prev_energy = curr_energy
+                
                 reward = self.compute_reward(info, done)
                 
                 episode_data.append((state, action, reward))
@@ -476,7 +568,7 @@ class DeepQNetwork:
         into the network. For sampled states, the target Q-values come
         straight from the Q-table (which achieves 82%+ success).
         """
-        n_batches = 500  # More training needed for proper distillation
+        n_batches = 2000  # Much more training for proper distillation (was 500)
         
         print(f"  Distilling Q-table into neural network ({n_batches} batches)...")
         print(f"  Q-table shape: {self.q_table.shape}")
@@ -494,7 +586,7 @@ class DeepQNetwork:
             for v_bin in range(n_vbins):
                 q_vals = self.q_table[seg, v_bin, :]
                 # Check if this state was visited (Q-values differ from initial)
-                if not np.allclose(q_vals, [2.0, 1.0, 0.0, -1.0], atol=0.01):
+                if not np.allclose(q_vals, [1.0, 1.2, 0.8, -0.5], atol=0.01):
                     # Normalize state
                     pos_norm = seg / max(n_segs, 1)
                     vel_norm = (v_bin * v_max / (n_vbins - 1)) / v_max
@@ -546,9 +638,10 @@ class DeepQNetwork:
                 batch_states = all_states[indices]
                 batch_targets = all_q_normalized[indices]
                 
-                loss = self._backward_batch(batch_states, batch_targets, learning_rate=self.lr)
+                # Higher LR for supervised distillation (3x online rate)
+                loss = self._backward_batch(batch_states, batch_targets, learning_rate=self.lr * 3)
                 
-                if (batch_idx + 1) % 100 == 0:
+                if (batch_idx + 1) % 200 == 0:
                     # Test: check if network matches Q-table policy
                     test_indices = np.random.choice(len(all_states), min(200, len(all_states)), replace=False)
                     net_actions = np.argmax(self.predict_batch(all_states[test_indices]), axis=1)
@@ -556,6 +649,11 @@ class DeepQNetwork:
                     agreement = np.mean(net_actions == qtable_actions)
                     print(f"  Batch {batch_idx+1}/{n_batches}: Loss={loss:.6f}, "
                           f"Policy agreement={agreement:.0%}")
+                    
+                    # Early stop if agreement is high enough
+                    if agreement > 0.85:
+                        print(f"  ✓ Early stop: {agreement:.0%} agreement reached!")
+                        break
         
         self.target_weights = self._deep_copy_weights(self.weights)
         print("  Phase 2 Complete: Network distilled from Q-table")
