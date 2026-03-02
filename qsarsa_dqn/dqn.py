@@ -76,15 +76,15 @@ class DeepQNetwork:
         self.weights = self._init_weights()
         self.target_weights = self._deep_copy_weights(self.weights)
         
-        # Q-table: balanced init — must COMPLETE route first, then optimize energy
+        # Q-table: original working init (gave 82% success)
         n_segments = getattr(env, 'n_segments', 749)
         n_speeds = 50
         self.q_table = np.zeros((n_segments, n_speeds, self.n_actions))
         # Action 0=Power, 1=Cruise, 2=Coast, 3=Brake
-        self.q_table[:, :, 0] = 1.5   # Power: preferred initially (must learn to move)
-        self.q_table[:, :, 1] = 1.0   # Cruise: moderate
-        self.q_table[:, :, 2] = 0.5   # Coast: lower initially
-        self.q_table[:, :, 3] = -0.5  # Brake: discouraged
+        self.q_table[:, :, 0] = 2.0   # Power: highest (train must move!)
+        self.q_table[:, :, 1] = 1.0   # Cruise
+        self.q_table[:, :, 2] = 0.0   # Coast
+        self.q_table[:, :, 3] = -1.0  # Brake
         self.prev_q_table = self.q_table.copy()
         self.cm_history = []
         
@@ -119,7 +119,7 @@ class DeepQNetwork:
         print(f"  Reward scale: ×{self.reward_scale}")
         print(f"  Target network: soft update τ={self.tau}")
         print(f"  Batch size: {self.batch_size} (vectorized)")
-        print(f"  Q-table init: Balanced (Power=1.5, Cruise=1.0, Coast=0.5)")
+        print(f"  Q-table init: Power=2.0, Cruise=1.0, Coast=0.0, Brake=-1.0")
         print(f"  φ threshold: {self.phi}")
     
     # =====================================================
@@ -133,7 +133,7 @@ class DeepQNetwork:
             std = np.sqrt(2.0 / sizes[i])
             weights[f'W{i}'] = np.random.randn(sizes[i], sizes[i+1]) * std
             weights[f'b{i}'] = np.zeros(sizes[i+1])
-        # Output bias: balanced start
+        # Output bias: match Q-table init preference
         last = len(sizes) - 2
         weights[f'b{last}'] = np.array([0.5, 0.3, 0.0, -0.5])
         return weights
@@ -269,45 +269,44 @@ class DeepQNetwork:
     
     def compute_reward(self, info, done):
         """
-        TWO-STAGE reward for <1500 kWh.
+        THREE-STAGE reward.
         
-        Problem with v1: energy_penalty(0.10) was 36x progress → agent
-        learned "never power" → 0% success → no learning.
+        Key lesson: the per-step energy penalty CANNOT exceed progress reward,
+        or the agent learns "never power" → 0% success.
         
-        Fix: Track success rate. Early on, focus on completion.
-        Once completing reliably (>70%), ramp up energy penalty.
+        Original working values: progress×10, energy×0.005, completion=50
+        That gave 82% success, 2700 kWh.
         
-        Stage 1 (success < 70%): energy × 0.02, progress × 8
-        Stage 2 (success > 70%): energy × 0.06, progress × 4
+        To reduce energy: use COMPLETION BONUS that scales with energy savings,
+        NOT stronger per-step penalties.
+        
+        Stage 1 (success < 50%): Learn to complete (like original)
+        Stage 2 (success 50-80%): Moderate energy awareness  
+        Stage 3 (success > 80%): Energy-optimized completion bonus
         """
-        # Determine stage based on recent success
         n_recent = min(200, len(self.success_history))
         if n_recent >= 50:
             recent_success = sum(self.success_history[-n_recent:]) / n_recent
         else:
             recent_success = 0.0
         
-        # Stage parameters
-        if recent_success > 0.70:
-            # Stage 2: Agent can complete → push hard on energy
-            energy_coeff = 0.06
-            progress_coeff = 4.0
-            completion_base = 20.0
-        else:
-            # Stage 1: Must learn to complete first
-            energy_coeff = 0.02
-            progress_coeff = 8.0
-            completion_base = 50.0
-        
         if done and info.get('completed', False):
             total_energy = info.get('total_energy', getattr(self.env, 'energy_kwh', 2500))
-            # Energy bonus: 2000→+50, 1500→+100, 1200→+130
-            energy_bonus = max(0, (2500 - total_energy) / 10.0)
-            if total_energy < 1500:
-                energy_bonus += 50.0
-            elif total_energy < 1800:
-                energy_bonus += 20.0
-            return (completion_base + energy_bonus) * self.reward_scale
+            
+            if recent_success > 0.80:
+                # Stage 3: massive energy-scaled bonus
+                # 2500→+0, 2000→+50, 1500→+100, 1200→+130
+                energy_bonus = max(0, (2500 - total_energy) / 10.0)
+                if total_energy < 1500: energy_bonus += 80.0
+                elif total_energy < 1800: energy_bonus += 30.0
+                return (20.0 + energy_bonus) * self.reward_scale
+            elif recent_success > 0.50:
+                # Stage 2: moderate energy bonus
+                energy_bonus = max(0, (2500 - total_energy) / 20.0)
+                return (50.0 + energy_bonus) * self.reward_scale
+            else:
+                # Stage 1: just reward completion
+                return 100.0 * self.reward_scale
         
         if info.get('violation', False) or info.get('backward', False):
             return -10.0 * self.reward_scale
@@ -323,48 +322,37 @@ class DeepQNetwork:
         limit = lim_val if lim_val > 1 else 22.0
         speed_ratio = current_v / max(limit, 1.0)
         
-        # 1. PROGRESS
-        progress_r = progress * progress_coeff
+        if recent_success > 0.80:
+            # Stage 3: energy matters but progress still dominant
+            # progress ≈ 0.0013 × 5 = 0.0067
+            # energy  ≈ 0.97  × 0.003 = 0.0029  (< progress, safe)
+            progress_r = progress * 5.0
+            energy_p = energy_step * 0.003
+            
+            # Small action shaping
+            action_r = 0.0
+            if grade < -1.0:  # Downhill
+                if action == 2:   action_r = 0.002   # Coast
+                elif action == 0: action_r = -0.003   # Power wasteful
+            elif grade < 0 and speed_ratio > 0.6:
+                if action == 2:   action_r = 0.001    # Coast at good speed
+            if action == 0 and speed_ratio > 0.8:
+                action_r = -0.002  # Don't power when fast
+            
+            reward = progress_r - energy_p + action_r
+            
+        elif recent_success > 0.50:
+            # Stage 2: slight energy awareness
+            progress_r = progress * 8.0
+            energy_p = energy_step * 0.001
+            reward = progress_r - energy_p
+            
+        else:
+            # Stage 1: just move forward (matches original working reward)
+            progress_r = progress * 10.0
+            energy_p = energy_step * 0.0005
+            reward = progress_r - energy_p
         
-        # 2. ENERGY PENALTY (scales with stage)
-        energy_p = energy_step * energy_coeff
-        
-        # 3. COAST BONUS (always active — nudges toward energy saving)
-        coast_r = 0.0
-        if action == 2 and current_v > 3.0:
-            coast_r = 0.02
-            if 0.4 <= speed_ratio <= 0.85:
-                coast_r = 0.04  # Sweet spot
-        
-        # 4. GRADE-AWARE
-        grade_r = 0.0
-        if grade < -1.0:  # Downhill
-            if action == 2:   grade_r = 0.03
-            elif action == 3: grade_r = 0.01
-            elif action == 0: grade_r = -0.04
-        elif grade < -0.3:  # Slight downhill
-            if action == 2:   grade_r = 0.02
-            elif action == 0: grade_r = -0.02
-        elif grade > 2.0:   # Steep uphill
-            if action == 0 and speed_ratio < 0.5:
-                grade_r = 0.01
-        
-        # 5. UNNECESSARY POWER PENALTY
-        power_p = 0.0
-        if action == 0:
-            if speed_ratio > 0.7:
-                power_p = -0.03
-            elif speed_ratio > 0.5 and grade <= 0:
-                power_p = -0.015
-        
-        # 6. SPEED EFFICIENCY
-        speed_r = 0.0
-        if 0.5 <= speed_ratio <= 0.75:
-            speed_r = 0.003
-        elif speed_ratio > 0.95:
-            speed_r = -0.008
-        
-        reward = progress_r - energy_p + coast_r + grade_r + power_p + speed_r
         return reward * self.reward_scale
     
     # =====================================================
@@ -539,7 +527,7 @@ class DeepQNetwork:
         
         visited_s, visited_q = [], []
         ns, nv = self.q_table.shape[0], self.q_table.shape[1]
-        init = np.array([1.5, 1.0, 0.5, -0.5])  # match Q-table init
+        init = np.array([2.0, 1.0, 0.0, -1.0])  # match Q-table init
         
         for seg in range(ns):
             for vb in range(nv):
