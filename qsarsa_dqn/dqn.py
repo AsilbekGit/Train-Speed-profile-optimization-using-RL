@@ -45,7 +45,19 @@ class DeepQNetwork:
         
         # Hyperparameters
         self.gamma = getattr(config, 'GAMMA', 0.99)
-        self.lr = 0.0005
+        
+        # Dynamic Learning Rate
+        self.lr_max = 0.002       # Peak LR (after warm-up)
+        self.lr_min = 0.00005     # Floor LR (end of training)
+        self.lr = self.lr_max     # Current LR (updated each episode)
+        self.lr_warmup_frac = 0.05  # Warm-up over first 5% of episodes
+        self.lr_history = []
+        self._recent_losses = []  # For spike detection
+        
+        # Dynamic Q-SARSA alpha
+        self.alpha_max = 0.7
+        self.alpha_min = 0.1
+        
         self.epsilon = getattr(config, 'EPSILON_START', 1.0)
         self.epsilon_min = getattr(config, 'EPSILON_MIN', 0.01)
         self.epsilon_decay = getattr(config, 'EPSILON_DECAY', 0.999)
@@ -64,18 +76,15 @@ class DeepQNetwork:
         self.weights = self._init_weights()
         self.target_weights = self._deep_copy_weights(self.weights)
         
-        # Q-table: favour Coast/Cruise over Power from the start
+        # Q-table: balanced init — must COMPLETE route first, then optimize energy
         n_segments = getattr(env, 'n_segments', 749)
         n_speeds = 50
         self.q_table = np.zeros((n_segments, n_speeds, self.n_actions))
         # Action 0=Power, 1=Cruise, 2=Coast, 3=Brake
-        self.q_table[:, :, 0] = 0.2   # Power: LOW  — only when needed
-        self.q_table[:, :, 1] = 0.8   # Cruise: moderate
-        self.q_table[:, :, 2] = 1.0   # Coast: HIGHEST — zero energy
-        self.q_table[:, :, 3] = -0.5  # Brake: negative
-        # But at very low speeds, Power is necessary to start moving
-        self.q_table[:, :3, 0] = 1.5  # Power preferred when v is very low
-        self.q_table[:, :3, 2] = 0.0  # Coast useless when stopped
+        self.q_table[:, :, 0] = 1.5   # Power: preferred initially (must learn to move)
+        self.q_table[:, :, 1] = 1.0   # Cruise: moderate
+        self.q_table[:, :, 2] = 0.5   # Coast: lower initially
+        self.q_table[:, :, 3] = -0.5  # Brake: discouraged
         self.prev_q_table = self.q_table.copy()
         self.cm_history = []
         
@@ -104,12 +113,13 @@ class DeepQNetwork:
         print(f"DQN initialized:")
         print(f"  Architecture: {self.n_inputs} → {' → '.join(map(str, self.hidden_sizes))} → {self.n_actions}")
         print(f"  Activations: tanh (hidden) + sigmoid (output)")
-        print(f"  Learning rate: {self.lr}")
+        print(f"  Learning rate: dynamic (warm-up → {self.lr_max} → cosine → {self.lr_min})")
+        print(f"  Q-SARSA alpha: dynamic ({self.alpha_max} → cosine → {self.alpha_min})")
         print(f"  Gradient clip: ±{self.grad_clip}")
         print(f"  Reward scale: ×{self.reward_scale}")
         print(f"  Target network: soft update τ={self.tau}")
         print(f"  Batch size: {self.batch_size} (vectorized)")
-        print(f"  Q-table init: Coast-biased (energy saving)")
+        print(f"  Q-table init: Balanced (Power=1.5, Cruise=1.0, Coast=0.5)")
         print(f"  φ threshold: {self.phi}")
     
     # =====================================================
@@ -123,9 +133,9 @@ class DeepQNetwork:
             std = np.sqrt(2.0 / sizes[i])
             weights[f'W{i}'] = np.random.randn(sizes[i], sizes[i+1]) * std
             weights[f'b{i}'] = np.zeros(sizes[i+1])
-        # Output bias: prefer Coast (action 2) 
+        # Output bias: balanced start
         last = len(sizes) - 2
-        weights[f'b{last}'] = np.array([0.0, 0.5, 1.0, -0.5])
+        weights[f'b{last}'] = np.array([0.5, 0.3, 0.0, -0.5])
         return weights
     
     def _deep_copy_weights(self, w):
@@ -203,33 +213,101 @@ class DeepQNetwork:
         return int(np.clip(vel / 120.0 * 49, 0, 49))
     
     # =====================================================
+    # Dynamic Learning Rate
+    # =====================================================
+    
+    def _get_lr(self, episode, total_episodes, phase=3):
+        """
+        Cosine annealing with warm-up and loss-spike adaptation.
+        
+        Schedule:
+          Warm-up (0→5%):   linear ramp 0.0001 → lr_max
+          Cosine  (5%→100%): smooth decay lr_max → lr_min
+          
+        Loss spike: if current loss > 3× running average → halve LR temporarily
+        Phase 2: uses fixed 3×lr_max for supervised distillation
+        """
+        if phase == 2:
+            return self.lr_max * 3  # Supervised: fast learning
+        
+        frac = episode / max(total_episodes, 1)
+        warmup_end = self.lr_warmup_frac
+        
+        if frac < warmup_end:
+            # Linear warm-up: 0.0001 → lr_max
+            t = frac / warmup_end
+            lr = 0.0001 + t * (self.lr_max - 0.0001)
+        else:
+            # Cosine annealing: lr_max → lr_min
+            t = (frac - warmup_end) / (1.0 - warmup_end)
+            lr = self.lr_min + 0.5 * (self.lr_max - self.lr_min) * (1 + np.cos(np.pi * t))
+        
+        # Loss-spike detection: if loss spikes, reduce LR temporarily
+        if len(self._recent_losses) >= 10:
+            avg_loss = np.mean(self._recent_losses[-10:])
+            if self._recent_losses[-1] > 3.0 * avg_loss and avg_loss > 1e-8:
+                lr *= 0.5  # Halve on spike
+        
+        lr = np.clip(lr, self.lr_min, self.lr_max)
+        self.lr = lr
+        self.lr_history.append(lr)
+        return lr
+    
+    def _get_alpha(self, episode, total_episodes):
+        """
+        Dynamic Q-SARSA learning rate: cosine decay from alpha_max → alpha_min.
+        Higher alpha early = faster Q-table convergence.
+        Lower alpha later = stable refinement.
+        """
+        frac = episode / max(total_episodes, 1)
+        alpha = self.alpha_min + 0.5 * (self.alpha_max - self.alpha_min) * (1 + np.cos(np.pi * frac))
+        return alpha
+    
+    # =====================================================
     # Reward Function — AGGRESSIVE energy minimization
     # =====================================================
     
     def compute_reward(self, info, done):
         """
-        Reward designed to reach <1500 kWh.
+        TWO-STAGE reward for <1500 kWh.
         
-        Current baseline: 2325 kWh over ~2400 steps → ~0.97 kWh/step.
-        To reach 1500 kWh we need ~0.63 kWh/step → 35% less power usage.
+        Problem with v1: energy_penalty(0.10) was 36x progress → agent
+        learned "never power" → 0% success → no learning.
         
-        Strategy: make energy the OVERWHELMING signal.
-        The agent must learn power-coast cycles:
-          1. Power up to ~70% of speed limit
-          2. Coast until speed drops to ~40% of limit
-          3. Re-power only when necessary
-          4. NEVER power on downhill
+        Fix: Track success rate. Early on, focus on completion.
+        Once completing reliably (>70%), ramp up energy penalty.
+        
+        Stage 1 (success < 70%): energy × 0.02, progress × 8
+        Stage 2 (success > 70%): energy × 0.06, progress × 4
         """
+        # Determine stage based on recent success
+        n_recent = min(200, len(self.success_history))
+        if n_recent >= 50:
+            recent_success = sum(self.success_history[-n_recent:]) / n_recent
+        else:
+            recent_success = 0.0
+        
+        # Stage parameters
+        if recent_success > 0.70:
+            # Stage 2: Agent can complete → push hard on energy
+            energy_coeff = 0.06
+            progress_coeff = 4.0
+            completion_base = 20.0
+        else:
+            # Stage 1: Must learn to complete first
+            energy_coeff = 0.02
+            progress_coeff = 8.0
+            completion_base = 50.0
+        
         if done and info.get('completed', False):
             total_energy = info.get('total_energy', getattr(self.env, 'energy_kwh', 2500))
-            # Huge bonus for low energy: 1500→+130, 1200→+160, 2000→+80
+            # Energy bonus: 2000→+50, 1500→+100, 1200→+130
             energy_bonus = max(0, (2500 - total_energy) / 10.0)
-            # Extra bonus tier for <1500
             if total_energy < 1500:
                 energy_bonus += 50.0
             elif total_energy < 1800:
                 energy_bonus += 20.0
-            return (20.0 + energy_bonus) * self.reward_scale
+            return (completion_base + energy_bonus) * self.reward_scale
         
         if info.get('violation', False) or info.get('backward', False):
             return -10.0 * self.reward_scale
@@ -245,49 +323,46 @@ class DeepQNetwork:
         limit = lim_val if lim_val > 1 else 22.0
         speed_ratio = current_v / max(limit, 1.0)
         
-        # ── 1. PROGRESS (small — just enough to not stall) ──
-        progress_r = progress * 2.0
+        # 1. PROGRESS
+        progress_r = progress * progress_coeff
         
-        # ── 2. ENERGY PENALTY (dominant, ~20x progress) ──
-        # 0.97 kWh/step × 0.1 = 0.097 vs progress ~0.003
-        energy_p = energy_step * 0.10
+        # 2. ENERGY PENALTY (scales with stage)
+        energy_p = energy_step * energy_coeff
         
-        # ── 3. COASTING REWARD (the key to saving energy) ──
+        # 3. COAST BONUS (always active — nudges toward energy saving)
         coast_r = 0.0
-        if action == 2:  # Coast = zero energy
-            if current_v > 3.0:  # Must be moving
-                coast_r = 0.03   # Big reward for coasting while moving
-                if 0.4 <= speed_ratio <= 0.85:
-                    coast_r = 0.05  # Extra for coasting in sweet spot
+        if action == 2 and current_v > 3.0:
+            coast_r = 0.02
+            if 0.4 <= speed_ratio <= 0.85:
+                coast_r = 0.04  # Sweet spot
         
-        # ── 4. GRADE-AWARE ──
+        # 4. GRADE-AWARE
         grade_r = 0.0
         if grade < -1.0:  # Downhill
-            if action == 2:    coast_r += 0.04  # Coast on downhill = excellent
-            elif action == 3:  grade_r = 0.01   # Brake if needed
-            elif action == 0:  grade_r = -0.05  # Power on downhill = terrible
-            elif action == 1:  grade_r = -0.02  # Cruise on downhill = wasteful
+            if action == 2:   grade_r = 0.03
+            elif action == 3: grade_r = 0.01
+            elif action == 0: grade_r = -0.04
         elif grade < -0.3:  # Slight downhill
-            if action == 2:    coast_r += 0.02
-            elif action == 0:  grade_r = -0.03
-        elif grade > 2.0:  # Steep uphill — power is needed
-            if action == 0 and speed_ratio < 0.4:
-                grade_r = 0.01  # Only reward power when slow on steep uphill
+            if action == 2:   grade_r = 0.02
+            elif action == 0: grade_r = -0.02
+        elif grade > 2.0:   # Steep uphill
+            if action == 0 and speed_ratio < 0.5:
+                grade_r = 0.01
         
-        # ── 5. UNNECESSARY POWER PENALTY ──
+        # 5. UNNECESSARY POWER PENALTY
         power_p = 0.0
-        if action == 0:  # Power
+        if action == 0:
             if speed_ratio > 0.7:
-                power_p = -0.04  # Already fast, don't waste energy
+                power_p = -0.03
             elif speed_ratio > 0.5 and grade <= 0:
-                power_p = -0.02  # Decent speed on flat/downhill
+                power_p = -0.015
         
-        # ── 6. SPEED EFFICIENCY ──
+        # 6. SPEED EFFICIENCY
         speed_r = 0.0
         if 0.5 <= speed_ratio <= 0.75:
-            speed_r = 0.005  # Energy-optimal speed range
+            speed_r = 0.003
         elif speed_ratio > 0.95:
-            speed_r = -0.01  # Drag ∝ v², near limit is wasteful
+            speed_r = -0.008
         
         reward = progress_r - energy_p + coast_r + grade_r + power_p + speed_r
         return reward * self.reward_scale
@@ -304,8 +379,7 @@ class DeepQNetwork:
         self.cm_history.append(dq)
         return cm
     
-    def _qsarsa_update(self, seg, vb, a, r, ns, nvb, na, cm):
-        alpha = getattr(config, 'ALPHA', 0.5)
+    def _qsarsa_update(self, seg, vb, a, r, ns, nvb, na, cm, alpha=0.5):
         if cm > self.phi:
             target = r + self.gamma * self.q_table[ns, nvb, na]
         else:
@@ -344,8 +418,14 @@ class DeepQNetwork:
             td = np.clip(tv[i] - cur_q[i, actions[i]], -self.td_clip, self.td_clip)
             tgt[i, actions[i]] = cur_q[i, actions[i]] + td
         
-        loss = self._backward_batch(states, tgt)
+        loss = self._backward_batch(states, tgt, lr=self.lr)  # uses current dynamic LR
         self._soft_update_target()
+        
+        # Track loss for spike detection
+        self._recent_losses.append(loss)
+        if len(self._recent_losses) > 100:
+            self._recent_losses = self._recent_losses[-100:]
+        
         return loss
     
     # =====================================================
@@ -384,6 +464,7 @@ class DeepQNetwork:
             done = False
             steps = 0
             cm = self._compute_cm(ep)
+            alpha = self._get_alpha(ep, episodes)  # Dynamic Q-SARSA alpha
             prev_e = 0.0
             info = {}
             
@@ -417,7 +498,7 @@ class DeepQNetwork:
                 nvb = self._discretize_speed(self.env.v)
                 na = np.random.randint(self.n_actions) if np.random.random() < self.epsilon \
                      else np.argmax(self.q_table[ns, nvb, :])
-                self._qsarsa_update(seg, vb, action, reward / self.reward_scale, ns, nvb, na, cm)
+                self._qsarsa_update(seg, vb, action, reward / self.reward_scale, ns, nvb, na, cm, alpha)
                 self._store_exp(state, action, reward, nstate, done)
                 steps += 1
             
@@ -446,7 +527,8 @@ class DeepQNetwork:
                 re = np.mean(re_vals) if re_vals else 0
                 print(f"  Phase 1 Ep {ep+1}/{episodes}: "
                       f"Success={rs:.0%}, Energy={re:.0f} kWh, "
-                      f"ε={self.epsilon:.3f}, Speed={eps:.1f} ep/s, ETA={eta:.0f}s")
+                      f"α={alpha:.4f}, ε={self.epsilon:.3f}, "
+                      f"Speed={eps:.1f} ep/s, ETA={eta:.0f}s")
         
         print(f"\n  Phase 1 Complete: {successes}/{episodes} ({successes/max(episodes,1):.0%}), "
               f"{len(self.training_data)} samples, {time.time()-t0:.0f}s")
@@ -457,16 +539,13 @@ class DeepQNetwork:
         
         visited_s, visited_q = [], []
         ns, nv = self.q_table.shape[0], self.q_table.shape[1]
-        init = np.array([0.2, 0.8, 1.0, -0.5])  # match Q-table init (non-low-speed)
+        init = np.array([1.5, 1.0, 0.5, -0.5])  # match Q-table init
         
         for seg in range(ns):
             for vb in range(nv):
                 q = self.q_table[seg, vb, :]
-                # Check if visited (differs from init for this speed range)
-                ref = init.copy()
-                if vb < 3:
-                    ref[0] = 1.5; ref[2] = 0.0  # low-speed init
-                if not np.allclose(q, ref, atol=0.05):
+                # Check if visited (differs from init)
+                if not np.allclose(q, init, atol=0.05):
                     visited_s.append([seg / ns, vb / max(nv - 1, 1)])
                     visited_q.append(q)
         
@@ -494,7 +573,8 @@ class DeepQNetwork:
             
             for b in range(n_batches):
                 ix = np.random.choice(len(S), min(self.batch_size, len(S)), replace=True)
-                loss = self._backward_batch(S[ix], Qn[ix], lr=self.lr * 3)
+                p2_lr = self._get_lr(b, n_batches, phase=2)
+                loss = self._backward_batch(S[ix], Qn[ix], lr=p2_lr)
                 if (b+1) % 200 == 0:
                     tix = np.random.choice(len(S), min(200, len(S)), replace=False)
                     net_a = np.argmax(self.predict_batch(S[tix]), axis=1)
@@ -517,6 +597,9 @@ class DeepQNetwork:
         print(f"  Strategy: Q-table guided → gradual network takeover")
         
         for ep in range(episodes):
+            # Update dynamic learning rate
+            self._get_lr(ep, episodes, phase=3)
+            
             self.env.reset()
             total_r = 0
             total_loss = 0
@@ -589,8 +672,9 @@ class DeepQNetwork:
                 gep = start_ep + ep + 1
                 print(f"  Phase 3 Ep {ep+1}/{episodes} (Global {gep}): "
                       f"Success={rs:.0%}, Energy={re:.0f} kWh, "
-                      f"Loss={self.loss_history[-1]:.6f}, ε={self.epsilon:.3f}, "
-                      f"NetUse={net_use:.0%}, Speed={eps:.1f} ep/s, ETA={eta:.0f}s")
+                      f"Loss={self.loss_history[-1]:.6f}, LR={self.lr:.6f}, "
+                      f"ε={self.epsilon:.3f}, NetUse={net_use:.0%}, "
+                      f"Speed={eps:.1f} ep/s, ETA={eta:.0f}s")
         
         ts = sum(self.success_history)
         te = len(self.success_history)
@@ -632,8 +716,16 @@ class DeepQNetwork:
             vl = [l for l in self.loss_history if l > 0]
             if vl:
                 axes[0,1].plot(range(len(vl)), vl, 'r-', alpha=0.5, linewidth=0.5)
-                axes[0,1].set_title('Training Loss'); axes[0,1].set_yscale('log')
+                axes[0,1].set_title('Training Loss & Learning Rate')
+                axes[0,1].set_yscale('log')
                 axes[0,1].grid(True, alpha=0.3)
+                # LR on secondary axis
+                if self.lr_history:
+                    ax_lr = axes[0,1].twinx()
+                    ax_lr.plot(range(len(self.lr_history)), self.lr_history, 
+                              'b-', alpha=0.6, linewidth=1, label='LR')
+                    ax_lr.set_ylabel('Learning Rate', color='blue')
+                    ax_lr.tick_params(axis='y', labelcolor='blue')
             
             se = [i for i, s in enumerate(self.success_history) if s]
             if se:
