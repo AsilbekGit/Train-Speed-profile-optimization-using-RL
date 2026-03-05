@@ -269,20 +269,19 @@ class DeepQNetwork:
     
     def compute_reward(self, info, done):
         """
-        THREE-STAGE reward.
+        THREE-STAGE reward targeting <1500 kWh.
         
-        Key lesson: the per-step energy penalty CANNOT exceed progress reward,
-        or the agent learns "never power" → 0% success.
+        v3 results: 93% success, 3128 kWh, Brake=40% (!!!)
+        Problem: Brake wastes kinetic energy that Power paid for.
+        Agent must learn: Coast >> Brake for energy efficiency.
         
-        Original working values: progress×10, energy×0.005, completion=50
-        That gave 82% success, 2700 kWh.
+        Fix: Stage 3 has strong brake penalty + coast reward.
+        Energy penalty raised to 0.6x of progress (safe, tested).
         
-        To reduce energy: use COMPLETION BONUS that scales with energy savings,
-        NOT stronger per-step penalties.
-        
-        Stage 1 (success < 50%): Learn to complete (like original)
-        Stage 2 (success 50-80%): Moderate energy awareness  
-        Stage 3 (success > 80%): Energy-optimized completion bonus
+        Math check (per step):
+          Stage 1: progress=0.0134, energy=0.0005 → 27x → MOVES
+          Stage 2: progress=0.0107, energy=0.0010 → 11x → moves
+          Stage 3: progress=0.0067, energy=0.0040 → 1.7x → energy matters
         """
         n_recent = min(200, len(self.success_history))
         if n_recent >= 50:
@@ -294,18 +293,17 @@ class DeepQNetwork:
             total_energy = info.get('total_energy', getattr(self.env, 'energy_kwh', 2500))
             
             if recent_success > 0.80:
-                # Stage 3: massive energy-scaled bonus
-                # 2500→+0, 2000→+50, 1500→+100, 1200→+130
+                # Stage 3: huge energy bonus
+                # 2500→+0, 2000→+50, 1500→+100
                 energy_bonus = max(0, (2500 - total_energy) / 10.0)
-                if total_energy < 1500: energy_bonus += 80.0
-                elif total_energy < 1800: energy_bonus += 30.0
-                return (20.0 + energy_bonus) * self.reward_scale
+                if total_energy < 1500: energy_bonus += 100.0
+                elif total_energy < 1800: energy_bonus += 40.0
+                elif total_energy < 2000: energy_bonus += 15.0
+                return (15.0 + energy_bonus) * self.reward_scale
             elif recent_success > 0.50:
-                # Stage 2: moderate energy bonus
                 energy_bonus = max(0, (2500 - total_energy) / 20.0)
                 return (50.0 + energy_bonus) * self.reward_scale
             else:
-                # Stage 1: just reward completion
                 return 100.0 * self.reward_scale
         
         if info.get('violation', False) or info.get('backward', False):
@@ -323,32 +321,60 @@ class DeepQNetwork:
         speed_ratio = current_v / max(limit, 1.0)
         
         if recent_success > 0.80:
-            # Stage 3: energy matters but progress still dominant
-            # progress ≈ 0.0013 × 5 = 0.0067
-            # energy  ≈ 0.97  × 0.003 = 0.0029  (< progress, safe)
-            progress_r = progress * 5.0
-            energy_p = energy_step * 0.003
+            # ══ STAGE 3: Energy optimization ══
+            progress_r = progress * 5.0       # ≈ 0.0067
+            energy_p = energy_step * 0.004    # ≈ 0.0039 (0.6x progress, safe)
             
-            # Small action shaping
-            action_r = 0.0
-            if grade < -1.0:  # Downhill
-                if action == 2:   action_r = 0.002   # Coast
-                elif action == 0: action_r = -0.003   # Power wasteful
-            elif grade < 0 and speed_ratio > 0.6:
-                if action == 2:   action_r = 0.001    # Coast at good speed
-            if action == 0 and speed_ratio > 0.8:
-                action_r = -0.002  # Don't power when fast
+            # COAST reward: zero energy, preserves momentum
+            coast_r = 0.0
+            if action == 2 and current_v > 2.0:
+                coast_r = 0.004                # Always reward coasting while moving
+                if 0.4 <= speed_ratio <= 0.85:
+                    coast_r = 0.008            # Sweet spot: good speed + zero energy
             
-            reward = progress_r - energy_p + action_r
+            # BRAKE penalty: wastes kinetic energy (the #1 problem!)
+            brake_p = 0.0
+            if action == 3:
+                if speed_ratio < 0.9:
+                    brake_p = -0.006           # Unnecessary brake = energy waste
+                # Only acceptable near speed limit
+                if speed_ratio > 0.95:
+                    brake_p = 0.001            # OK to brake at speed limit
+            
+            # POWER penalty when unnecessary
+            power_p = 0.0
+            if action == 0:
+                if speed_ratio > 0.7:
+                    power_p = -0.004           # Already fast, waste of energy
+                elif speed_ratio > 0.5 and grade < 0:
+                    power_p = -0.003           # Downhill + decent speed
+            
+            # GRADE-aware
+            grade_r = 0.0
+            if grade < -1.0:  # Downhill: gravity is free energy
+                if action == 2:   grade_r = 0.005   # Coast on downhill = best
+                elif action == 0: grade_r = -0.006   # Power on downhill = worst
+                elif action == 3: grade_r = -0.003   # Brake on downhill = wasteful
+            elif grade < -0.3:
+                if action == 2:   grade_r = 0.003
+                elif action == 0: grade_r = -0.003
+            elif grade > 2.0:  # Steep uphill: power is needed
+                if action == 0 and speed_ratio < 0.4:
+                    grade_r = 0.002
+            
+            reward = progress_r - energy_p + coast_r + brake_p + power_p + grade_r
             
         elif recent_success > 0.50:
-            # Stage 2: slight energy awareness
+            # ══ STAGE 2: Slight energy awareness ══
             progress_r = progress * 8.0
             energy_p = energy_step * 0.001
-            reward = progress_r - energy_p
+            # Small brake penalty to start learning
+            brake_p = -0.002 if (action == 3 and speed_ratio < 0.8) else 0.0
+            coast_r = 0.002 if (action == 2 and current_v > 3.0) else 0.0
+            reward = progress_r - energy_p + brake_p + coast_r
             
         else:
-            # Stage 1: just move forward (matches original working reward)
+            # ══ STAGE 1: Just move forward ══
             progress_r = progress * 10.0
             energy_p = energy_step * 0.0005
             reward = progress_r - energy_p
