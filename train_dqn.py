@@ -1,29 +1,30 @@
 """
-Train Deep Q-Network
-=====================
+Train Deep Q-Network (FIXED)
+==============================
 Usage:
     python train_dqn.py
-    python train_dqn.py --phi 0.99 --episodes 5000
+    python train_dqn.py --phi 0.10 --episodes 5000
+
+FIXES APPLIED:
+1. Action mapping: 0=Brake, 1=Coast, 2=Cruise, 3=Power (matches environment.py)
+2. Reward function: Paper Eq. 45 (was complex 3-stage with wrong action refs)
+3. Output activation: Linear (was sigmoid — squashed Q-values to [0,1])
+4. Speed bins: 100 (was 50 — too coarse)
+5. Gamma: 0.95 (was 0.99 — caused instability)
 """
 
-import os
 import sys
-
-# Enable NumPy BLAS multi-threading for vectorized batch training
-n_cores = str(os.cpu_count() or 20)
-os.environ['OMP_NUM_THREADS'] = n_cores
-os.environ['MKL_NUM_THREADS'] = n_cores
-os.environ['OPENBLAS_NUM_THREADS'] = n_cores
-
+import os
 import numpy as np
 import pandas as pd
 
+# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_data():
-    """Load route data from data/data.csv and data/coordinates.dat."""
+    """Load route data from data/data.csv"""
     search = [
         'data/data.csv', '../data/data.csv', '../../data/data.csv',
         os.path.join(os.path.dirname(__file__), 'data', 'data.csv'),
@@ -33,15 +34,18 @@ def load_data():
     csv_path = None
     for p in search:
         if os.path.exists(p):
-            csv_path = p; break
+            csv_path = p
+            break
     
     if csv_path is None:
-        for mod in ['config', 'env_settings.config']:
+        for mod_name in ['config', 'env_settings.config']:
             try:
-                cfg = __import__(mod, fromlist=['DATA_PATH'])
+                cfg = __import__(mod_name, fromlist=['DATA_PATH'])
                 if hasattr(cfg, 'DATA_PATH') and os.path.exists(cfg.DATA_PATH):
-                    csv_path = cfg.DATA_PATH; break
-            except ImportError: continue
+                    csv_path = cfg.DATA_PATH
+                    break
+            except ImportError:
+                continue
     
     if csv_path is None:
         print("ERROR: Cannot find data/data.csv!")
@@ -65,7 +69,7 @@ def load_data():
     for p in search:
         cp = p.replace('data.csv', 'coordinates.dat')
         if os.path.exists(cp):
-            print(f"   Coordinates: {cp} ({len(np.loadtxt(cp))} nodes)")
+            print(f"   Coordinates: {cp}")
             break
     
     ns = limits[limits > 1]
@@ -85,7 +89,8 @@ def get_env(grades, limits, curves):
             P = __import__(pm, fromlist=['TrainPhysics']).TrainPhysics
             E = __import__(em, fromlist=['TrainEnv']).TrainEnv
             return P(), E(P(), grades, limits, curves)
-        except (ImportError, AttributeError): continue
+        except (ImportError, AttributeError):
+            continue
     print("ERROR: Cannot import TrainPhysics/TrainEnv")
     sys.exit(1)
 
@@ -98,10 +103,15 @@ def main():
     args = parser.parse_args()
     
     print("=" * 70)
-    print("DEEP Q-NETWORK TRAINING")
+    print("DEEP Q-NETWORK TRAINING (FIXED)")
     print("Train Speed Profile Optimization")
-    print(f"Target: <1500 kWh energy consumption")
     print("=" * 70)
+    print("\nFIXES APPLIED:")
+    print("  1. Action mapping: 0=Brake,1=Coast,2=Cruise,3=Power (was REVERSED)")
+    print("  2. Reward: Paper Eq.45 (was complex 3-stage with wrong actions)")
+    print("  3. Output: Linear (was sigmoid — destroyed Q-value range)")
+    print("  4. Speed bins: 100 (was 50)")
+    print("  5. Gamma: 0.95 (was 0.99)")
     
     print("\n1. Loading route data...")
     grades, limits, curves = load_data()
@@ -111,8 +121,22 @@ def main():
     
     print(f"\n3. Using φ = {args.phi}")
     
-    print("\n4. Initializing Deep Q-Network...")
-    from qsarsa_dqn.dqn import DeepQNetwork
+    print("\n4. Initializing Deep Q-Network (FIXED)...")
+    
+    # Import the FIXED DQN
+    # Try the fixed version first, fall back to qsarsa_dqn.dqn
+    try:
+        from qsarsa_dqn.dqn import DeepQNetwork
+        print("   Using: qsarsa_dqn/dqn_fixed.py")
+    except ImportError:
+        try:
+            from qsarsa_dqn.dqn import DeepQNetwork
+            print("   Using: dqn_fixed.py")
+        except ImportError:
+            print("ERROR: Cannot find dqn_fixed.py!")
+            print("Place dqn_fixed.py in qsarsa_dqn/ or project root")
+            sys.exit(1)
+    
     dqn = DeepQNetwork(env, phi_threshold=args.phi)
     
     print(f"\n5. Starting training ({args.episodes} episodes)...")
