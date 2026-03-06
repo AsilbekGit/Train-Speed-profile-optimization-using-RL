@@ -642,8 +642,6 @@ class DeepQNetwork:
                 if len(sy) > 50:
                     ma = np.convolve(sy, np.ones(50)/50, mode='valid')
                     axes[0,1].plot(range(sx[0]+49, sx[0]+49+len(ma)), ma, 'r-', lw=2)
-                axes[0,1].axhline(1500, c='orange', ls='--', label='1500 kWh target')
-                axes[0,1].legend()
             axes[0,1].set_title('Energy (successful)'); axes[0,1].grid(True, alpha=0.3)
 
             # Loss
@@ -727,15 +725,12 @@ class DeepQNetwork:
             pos = np.array(segs) * getattr(config, 'DX', 100) / 1000
 
             a1.plot(pos, np.array(vels)*3.6, 'b-', lw=1.5)
-            lim_pos = np.arange(self.n_segments) * getattr(config, 'DX', 100) / 1000
-            a1.plot(lim_pos, self.limits * 3.6, 'r--', lw=0.8, alpha=0.5, label='Speed limit')
             a1.set_ylabel('Speed (km/h)'); a1.set_title('Speed Profile')
-            a1.legend(); a1.grid(True, alpha=0.3)
+            a1.grid(True, alpha=0.3)
 
             a2.plot(pos, ens, 'r-', lw=1.5)
-            a2.axhline(1500, c='orange', ls='--', label='1500 kWh target')
             a2.set_ylabel('Energy (kWh)'); a2.set_title('Cumulative Energy')
-            a2.legend(); a2.grid(True, alpha=0.3)
+            a2.grid(True, alpha=0.3)
 
             colors = ['red','orange','blue','green']
             for i in range(4):
