@@ -249,8 +249,8 @@ class DeepQNetwork:
     # ================================================================
 
     def train(self, episodes=5000):
-        p1_eps = int(episodes * 0.40)   # 40% Q-SARSA (learn to complete)
-        p3_eps = episodes - p1_eps      # 60% DQN fine-tuning (minimize energy)
+        p1_eps = int(episodes * 0.25)   # 25% Q-SARSA (learn to complete)
+        p3_eps = episodes - p1_eps      # 75% DQN fine-tuning (minimize energy)
 
         print(f"\n{'='*70}")
         print(f"PHASE 1: Q-SARSA -- Learn to Complete Route ({p1_eps} episodes)")
@@ -535,34 +535,39 @@ class DeepQNetwork:
 
     def _energy_reward(self, env_reward, done, action, energy_step, seg, ep, total_eps):
         """
-        Energy-aware reward for Phase 3.
+        Energy-aware reward for Phase 3 — AGGRESSIVE version.
         
-        Strategy: start with mostly env_reward (ensures completion),
-        gradually increase energy penalties as training progresses.
+        Key changes from v1 (2095 kWh):
+        - env_reward fades to 15% (was 50%) — env reward has NO energy penalty
+        - Energy penalty 25x (was 5x)
+        - Coast bonus 3x bigger
+        - Power penalty 4x bigger on downhill
+        - Completion reward gap: 500 for <1200 vs 5 for >2500
         """
-        # Completion is always good
+        # Completion: huge reward difference based on energy
         if done and self.env.seg_idx >= self.n_segments - 2:
             total_e = getattr(self.env, 'energy_kwh', 0)
-            # Reward inversely proportional to energy
             if total_e < 1200:
-                return 200.0
+                return 500.0
             elif total_e < 1500:
-                return 150.0
+                return 300.0
+            elif total_e < 1800:
+                return 100.0
             elif total_e < 2000:
-                return 80.0
-            elif total_e < 2500:
-                return 40.0
+                return 30.0
             else:
-                return 20.0
+                return 5.0    # Completing at >2000 kWh is barely rewarded
 
         # Phase progress: 0 -> 1 over training
         progress = min(1.0, ep / max(total_eps, 1))
+        # Accelerate: spend first 30% ramping, then full strength
+        p = min(1.0, progress / 0.3) if progress < 0.3 else 1.0
 
-        # Start with env_reward (proven), fade in energy penalty
-        base = env_reward * (1.0 - 0.5 * progress)  # env reward fades to 50%
+        # Env reward fades to 15% (it has NO energy penalty, so we must override it)
+        base = env_reward * (1.0 - 0.85 * p)
 
-        # Energy penalty -- grows with training progress
-        e_pen = -energy_step * 5.0 * progress   # Starts at 0, grows to -5x
+        # Energy penalty — STRONG: each kWh of energy hurts
+        e_pen = -energy_step * 25.0 * p
 
         # Grade-aware action shaping
         grade = self.grades[seg] if seg < len(self.grades) else 0
@@ -572,28 +577,35 @@ class DeepQNetwork:
         speed_ratio = v / max(limit, 1.0)
 
         shape = 0.0
-        # Reward coasting (zero energy, preserves momentum)
-        if action == self.A_COAST and v > 3.0:
-            shape += 0.5 * progress
-            if grade < -0.3:       # Downhill: gravity provides free energy
-                shape += 1.0 * progress
-        
-        # Penalize power when not needed
+
+        # ── COAST: zero energy cost, best action for energy saving ──
+        if action == self.A_COAST and v > 2.0:
+            shape += 1.5 * p                        # Always good
+            if grade < -0.3:
+                shape += 3.0 * p                    # Downhill coast = free ride
+            elif grade < 0.5 and speed_ratio > 0.4:
+                shape += 1.0 * p                    # Flat/gentle, decent speed
+
+        # ── CRUISE: uses just enough energy to maintain speed ──
+        if action == self.A_CRUISE and 0.4 < speed_ratio < 0.95:
+            shape += 0.8 * p                        # Efficient speed maintenance
+
+        # ── POWER: expensive, only justified on steep uphill at low speed ──
         if action == self.A_POWER:
-            if speed_ratio > 0.75:
-                shape -= 0.8 * progress   # Already fast
-            if grade < -0.5:
-                shape -= 1.5 * progress   # Downhill: coast instead!
-        
-        # Penalize unnecessary braking (wastes kinetic energy)
-        if action == self.A_BRAKE and speed_ratio < 0.85:
-            shape -= 0.5 * progress
+            if grade < -0.3:
+                shape -= 5.0 * p                    # Downhill power = worst waste
+            elif grade < 0.5 and speed_ratio > 0.5:
+                shape -= 2.5 * p                    # Flat + decent speed = unnecessary
+            elif speed_ratio > 0.8:
+                shape -= 2.0 * p                    # Already fast enough
+            # Power is OK only on steep uphill at low speed (no penalty)
 
-        # Cruise is efficient for maintaining speed
-        if action == self.A_CRUISE and 0.5 < speed_ratio < 0.95:
-            shape += 0.3 * progress
+        # ── BRAKE: wastes kinetic energy that Power paid for ──
+        if action == self.A_BRAKE:
+            if speed_ratio < 0.9:
+                shape -= 1.5 * p                    # Not near limit = wasteful
 
-        return (base + e_pen + shape) * 0.01  # Scale down for network stability
+        return (base + e_pen + shape) * 0.01
 
     # ================================================================
     # Save results & speed profile
