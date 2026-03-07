@@ -435,6 +435,8 @@ class DeepQNetwork:
 
         # Reset epsilon for Phase 3 exploration
         self.epsilon = 0.08
+        # Track best Q-table snapshot
+        best_q_snapshot = self.q.copy()
 
         for ep in range(1, episodes + 1):
             self.env.reset()
@@ -445,8 +447,16 @@ class DeepQNetwork:
             steps = 0
             prev_energy = 0.0
 
-            # Gradually shift from Q-table -> network
-            net_frac = min(0.8, 0.1 + 0.7 * (ep / episodes))
+            # Cap network at 35% — 42% agreement means it hurts more than helps
+            net_frac = min(0.35, 0.05 + 0.30 * (ep / episodes))
+
+            # Adaptive safety: if recent success drops, dial back aggression
+            n_check = min(100, len(self.success_history))
+            if n_check >= 50:
+                recent_sr = sum(self.success_history[-n_check:]) / n_check
+            else:
+                recent_sr = 1.0
+            safety = max(0.3, min(1.0, recent_sr / 0.95))  # 1.0 at 95%+, drops below
 
             while not done and steps < max_steps:
                 raw = self.env._get_state()
@@ -473,7 +483,7 @@ class DeepQNetwork:
 
                 # -- ENERGY-AWARE REWARD --
                 reward = self._energy_reward(env_reward, done, action,
-                                              energy_step, seg, ep, episodes)
+                                              energy_step, seg, ep, episodes, safety)
                 total_r += reward
 
                 self._store(state_n, action, reward, new_state_n, done)
@@ -504,6 +514,7 @@ class DeepQNetwork:
                 successes += 1
                 if ep_energy < best_energy:
                     best_energy = ep_energy
+                    best_q_snapshot = self.q.copy()  # Save best Q-table
 
             self.success_history.append(completed)
             self.energy_history.append(ep_energy)
@@ -533,16 +544,17 @@ class DeepQNetwork:
         print(f"\n  Phase 3 done: {successes}/{episodes} ({rate:.1f}%) in {time.time()-t0:.0f}s")
         print(f"  Best energy: {best_energy:.0f} kWh")
 
-    def _energy_reward(self, env_reward, done, action, energy_step, seg, ep, total_eps):
+        # Restore the Q-table from the best-energy episode
+        self.q = best_q_snapshot.copy()
+        print(f"  Restored Q-table from best-energy episode")
+
+        # ── PHASE 4: Greedy Q-table energy sweep ──
+        self._greedy_energy_sweep()
+
+    def _energy_reward(self, env_reward, done, action, energy_step, seg, ep, total_eps, safety=1.0):
         """
-        Energy-aware reward for Phase 3 — AGGRESSIVE version.
-        
-        Key changes from v1 (2095 kWh):
-        - env_reward fades to 15% (was 50%) — env reward has NO energy penalty
-        - Energy penalty 25x (was 5x)
-        - Coast bonus 3x bigger
-        - Power penalty 4x bigger on downhill
-        - Completion reward gap: 500 for <1200 vs 5 for >2500
+        Energy-aware reward for Phase 3.
+        safety: 0.3-1.0 — scales back aggression if success rate drops.
         """
         # Completion: huge reward difference based on energy
         if done and self.env.seg_idx >= self.n_segments - 2:
@@ -562,6 +574,7 @@ class DeepQNetwork:
         progress = min(1.0, ep / max(total_eps, 1))
         # Accelerate: spend first 30% ramping, then full strength
         p = min(1.0, progress / 0.3) if progress < 0.3 else 1.0
+        p *= safety  # Scale back if success rate drops
 
         # Env reward fades to 15% (it has NO energy penalty, so we must override it)
         base = env_reward * (1.0 - 0.85 * p)
@@ -606,6 +619,78 @@ class DeepQNetwork:
                 shape -= 1.5 * p                    # Not near limit = wasteful
 
         return (base + e_pen + shape) * 0.01
+
+    # ================================================================
+    # PHASE 4: Greedy energy sweep on Q-table
+    # ================================================================
+
+    def _greedy_energy_sweep(self):
+        """
+        Post-training optimization: simulate the route, find Power actions
+        that can be replaced by Coast/Cruise without losing route completion.
+        """
+        print(f"\n{'='*70}")
+        print(f"PHASE 4: Greedy Energy Sweep")
+        print(f"{'='*70}")
+
+        baseline_e = self._simulate_energy()
+        if baseline_e is None:
+            print("  Cannot run sweep — route incomplete with current Q-table")
+            return
+        print(f"  Baseline energy: {baseline_e:.0f} kWh")
+
+        for round_num in range(1, 21):
+            # Simulate and find positions where Power is used
+            self.env.reset()
+            max_steps = getattr(config, 'MAX_STEPS_PER_EPISODE', 20000)
+            power_positions = []
+
+            for step in range(max_steps):
+                seg = min(self.env.seg_idx, self.n_segments - 1)
+                vb = self._vbin(self.env.v)
+                action = int(np.argmax(self.q[seg, vb, :]))
+                if action == self.A_POWER:
+                    grade = self.grades[seg] if seg < len(self.grades) else 0
+                    power_positions.append((seg, vb, grade))
+                _, _, done, _ = self.env.step(action)
+                if done or self.env.v < 0.1:
+                    break
+
+            power_positions.sort(key=lambda x: x[2])  # downhill first
+
+            changes = 0
+            for seg, vb, grade in power_positions:
+                for try_action in [self.A_COAST, self.A_CRUISE]:
+                    old_q = self.q[seg, vb, :].copy()
+                    self.q[seg, vb, try_action] = self.q[seg, vb, self.A_POWER] + 0.5
+                    new_e = self._simulate_energy()
+                    if new_e is not None and new_e < baseline_e - 1:
+                        baseline_e = new_e
+                        changes += 1
+                        break
+                    else:
+                        self.q[seg, vb, :] = old_q
+
+            print(f"  Round {round_num}: {changes} swaps, energy={baseline_e:.0f} kWh")
+            if changes == 0:
+                break
+
+        print(f"  Final energy after sweep: {baseline_e:.0f} kWh")
+
+    def _simulate_energy(self):
+        """Run one greedy episode, return energy or None if incomplete."""
+        self.env.reset()
+        max_steps = getattr(config, 'MAX_STEPS_PER_EPISODE', 20000)
+        for step in range(max_steps):
+            seg = min(self.env.seg_idx, self.n_segments - 1)
+            vb = self._vbin(self.env.v)
+            action = int(np.argmax(self.q[seg, vb, :]))
+            _, _, done, _ = self.env.step(action)
+            if done:
+                return getattr(self.env, 'energy_kwh', 0) if self.env.seg_idx >= self.n_segments - 2 else None
+            if self.env.v < 0.1:
+                return None
+        return None
 
     # ================================================================
     # Save results & speed profile
