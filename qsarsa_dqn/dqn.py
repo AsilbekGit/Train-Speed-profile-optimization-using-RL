@@ -626,21 +626,72 @@ class DeepQNetwork:
 
     def _greedy_energy_sweep(self):
         """
-        Post-training optimization: simulate the route, find Power actions
-        that can be replaced by Coast/Cruise without losing route completion.
+        Post-training optimization — EXHAUSTIVE version.
+        
+        v1 only tested Power positions along ONE trajectory (~500 cells).
+        v2 scans the ENTIRE Q-table (74,900 cells) for Power entries,
+        then tries replacing each with Coast/Cruise.
+        
+        Also does multi-step: after single-cell swaps converge,
+        tries batch swaps (all Power in a segment at once).
         """
         print(f"\n{'='*70}")
-        print(f"PHASE 4: Greedy Energy Sweep")
+        print(f"PHASE 4: Greedy Energy Sweep (Exhaustive)")
         print(f"{'='*70}")
 
         baseline_e = self._simulate_energy()
         if baseline_e is None:
-            print("  Cannot run sweep — route incomplete with current Q-table")
+            print("  Cannot run sweep — route incomplete")
             return
         print(f"  Baseline energy: {baseline_e:.0f} kWh")
 
-        for round_num in range(1, 21):
-            # Simulate and find positions where Power is used
+        # ── STEP 1: Batch swap — entire segments at once ──
+        print(f"\n  Step 1: Segment-level batch swaps")
+        for round_num in range(1, 11):
+            changes = 0
+            for seg in range(self.n_segments):
+                grade = self.grades[seg] if seg < len(self.grades) else 0
+                # Only try segments where grade <= 1% (flat/downhill)
+                if grade > 1.0:
+                    continue
+                
+                # Check if any speed bin has Power as best action
+                power_bins = []
+                for vb in range(100):
+                    if np.argmax(self.q[seg, vb, :]) == self.A_POWER:
+                        power_bins.append(vb)
+                
+                if not power_bins:
+                    continue
+                
+                # Try replacing ALL Power in this segment with Coast
+                old_q_seg = self.q[seg, :, :].copy()
+                for vb in power_bins:
+                    self.q[seg, vb, self.A_COAST] = self.q[seg, vb, self.A_POWER] + 0.5
+                
+                new_e = self._simulate_energy()
+                if new_e is not None and new_e < baseline_e - 1:
+                    baseline_e = new_e
+                    changes += 1
+                else:
+                    # Try Cruise instead
+                    self.q[seg, :, :] = old_q_seg.copy()
+                    for vb in power_bins:
+                        self.q[seg, vb, self.A_CRUISE] = self.q[seg, vb, self.A_POWER] + 0.5
+                    new_e = self._simulate_energy()
+                    if new_e is not None and new_e < baseline_e - 1:
+                        baseline_e = new_e
+                        changes += 1
+                    else:
+                        self.q[seg, :, :] = old_q_seg
+            
+            print(f"    Round {round_num}: {changes} segment swaps, energy={baseline_e:.0f} kWh")
+            if changes == 0:
+                break
+
+        # ── STEP 2: Trajectory-based single-cell swaps (original method, refined) ──
+        print(f"\n  Step 2: Single-cell swaps along trajectory")
+        for round_num in range(1, 31):
             self.env.reset()
             max_steps = getattr(config, 'MAX_STEPS_PER_EPISODE', 20000)
             power_positions = []
@@ -656,7 +707,8 @@ class DeepQNetwork:
                 if done or self.env.v < 0.1:
                     break
 
-            power_positions.sort(key=lambda x: x[2])  # downhill first
+            # Sort: downhill first (most savings potential)
+            power_positions.sort(key=lambda x: x[2])
 
             changes = 0
             for seg, vb, grade in power_positions:
@@ -664,18 +716,50 @@ class DeepQNetwork:
                     old_q = self.q[seg, vb, :].copy()
                     self.q[seg, vb, try_action] = self.q[seg, vb, self.A_POWER] + 0.5
                     new_e = self._simulate_energy()
-                    if new_e is not None and new_e < baseline_e - 1:
+                    if new_e is not None and new_e < baseline_e - 0.5:
                         baseline_e = new_e
                         changes += 1
                         break
                     else:
                         self.q[seg, vb, :] = old_q
 
-            print(f"  Round {round_num}: {changes} swaps, energy={baseline_e:.0f} kWh")
+            print(f"    Round {round_num}: {changes} cell swaps, energy={baseline_e:.0f} kWh")
             if changes == 0:
                 break
 
-        print(f"  Final energy after sweep: {baseline_e:.0f} kWh")
+        # ── STEP 3: Try braking less — replace Brake with Coast ──
+        print(f"\n  Step 3: Replace unnecessary braking with coasting")
+        for round_num in range(1, 11):
+            self.env.reset()
+            max_steps = getattr(config, 'MAX_STEPS_PER_EPISODE', 20000)
+            brake_positions = []
+
+            for step in range(max_steps):
+                seg = min(self.env.seg_idx, self.n_segments - 1)
+                vb = self._vbin(self.env.v)
+                action = int(np.argmax(self.q[seg, vb, :]))
+                if action == self.A_BRAKE:
+                    brake_positions.append((seg, vb))
+                _, _, done, _ = self.env.step(action)
+                if done or self.env.v < 0.1:
+                    break
+
+            changes = 0
+            for seg, vb in brake_positions:
+                old_q = self.q[seg, vb, :].copy()
+                self.q[seg, vb, self.A_COAST] = self.q[seg, vb, self.A_BRAKE] + 0.5
+                new_e = self._simulate_energy()
+                if new_e is not None and new_e < baseline_e - 0.5:
+                    baseline_e = new_e
+                    changes += 1
+                else:
+                    self.q[seg, vb, :] = old_q
+
+            print(f"    Round {round_num}: {changes} brake->coast swaps, energy={baseline_e:.0f} kWh")
+            if changes == 0:
+                break
+
+        print(f"\n  FINAL energy after sweep: {baseline_e:.0f} kWh")
 
     def _simulate_energy(self):
         """Run one greedy episode, return energy or None if incomplete."""
