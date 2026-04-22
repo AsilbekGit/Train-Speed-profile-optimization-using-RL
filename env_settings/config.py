@@ -20,8 +20,8 @@ MAX_SPEED_MS = 130.0 / 3.6
 
 # --- Davis Coefficients (Uncalibrated base) ---
 # C0 will be calibrated dynamically
-C1 = 420.0
-C2 = 38.0
+C1 = 0.01
+C2 = 0.000227
 
 # --- RL Settings ---
 DX = 100.0                # Segment length (meters)
