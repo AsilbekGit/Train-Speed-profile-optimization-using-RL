@@ -47,8 +47,7 @@ class TrainPhysics:
         f_target = p_mech_w / v_ref_ms
         
         # F = C0 + C1v + C2v^2
-        c0 = f_target - (config.C1 * v_ref_ms) - (config.C2 * (v_ref_ms**2))
-        
+        c0 = 1.1
         return max(0.0, c0)
 
     def get_total_resistance(self, v, grade_pct, curv_pct):
