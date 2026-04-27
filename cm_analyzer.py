@@ -59,8 +59,13 @@ class CMAnalyzer:
         return uniform_filter1d(data, size=window_size, mode='nearest')
     
     def detect_threshold_from_trend(self, ln_cm_smooth):
-        stable_start = int(len(ln_cm_smooth) * 0.7)
-        for i in range(len(ln_cm_smooth) - 200):
+        # Restrict the search to the second half — convergence happens late,
+        # and an early flat region (e.g. while the agent is stuck) would
+        # otherwise be picked as the "stable" zone, giving the wrong phi.
+        n = len(ln_cm_smooth)
+        search_start = n // 2
+        stable_start = int(n * 0.7)
+        for i in range(search_start, n - 200):
             window = ln_cm_smooth[i:i+200]
             if np.std(window) < 0.3:
                 stable_start = i

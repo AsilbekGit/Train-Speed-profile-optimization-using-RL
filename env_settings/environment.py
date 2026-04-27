@@ -68,7 +68,8 @@ class TrainEnv:
         elif action == 1:  # Coast
             pass
         elif action == 2:  # Cruise
-            f_trac = max(0, resistance)
+            # Cap at max physical traction so cruise can never exceed Power
+            f_trac = max(0.0, min(resistance, self.phy.get_max_traction_force(self.v)))
         elif action == 3:  # Power
             f_trac = self.phy.get_max_traction_force(self.v)
 
@@ -86,9 +87,9 @@ class TrainEnv:
         self.pos_in_seg += ds
         self.total_distance += ds
 
-        # Energy consumption
-        if f_trac > 0 and self.v > 0:
-            p_elec_watts = (f_trac * self.v) / self.phy.eta
+        # Energy consumption — use avg velocity over the step (matches ds calc)
+        if f_trac > 0 and avg_velocity > 0:
+            p_elec_watts = (f_trac * avg_velocity) / self.phy.eta
             e_kwh_step = (p_elec_watts * config.DT) / 3.6e6
         else:
             e_kwh_step = 0.0

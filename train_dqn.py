@@ -69,7 +69,8 @@ def get_env(grades, limits, curves):
         try:
             P = __import__(pm, fromlist=['TrainPhysics']).TrainPhysics
             E = __import__(em, fromlist=['TrainEnv']).TrainEnv
-            return P(), E(P(), grades, limits, curves)
+            physics = P()
+            return physics, E(physics, grades, limits, curves)
         except (ImportError, AttributeError): continue
     print("ERROR: Cannot import TrainPhysics/TrainEnv"); sys.exit(1)
 

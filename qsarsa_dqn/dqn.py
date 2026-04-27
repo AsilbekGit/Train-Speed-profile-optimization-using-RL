@@ -370,13 +370,17 @@ class DeepQNetwork:
 
     def _phase2(self):
         # Collect visited Q-table entries
+        # Use the SAME normalization as inference (_norm) so the network
+        # sees consistent inputs in Phase 2 distillation and Phase 3.
         visited_s, visited_q = [], []
         init = np.array([-2.0, 0.5, 2.0, 5.0])
+        vbin_size = getattr(config, 'VEL_BIN_SIZE', 0.5)
         for seg in range(self.n_segments):
             for vb in range(100):
                 q = self.q[seg, vb, :]
                 if not np.allclose(q, init, atol=0.1):
-                    visited_s.append([seg / self.n_segments, vb / 99.0])
+                    raw = np.array([seg, vb * vbin_size])
+                    visited_s.append(self._norm(raw).tolist())
                     visited_q.append(q)
 
         print(f"  Visited states: {len(visited_s)}")
@@ -386,16 +390,17 @@ class DeepQNetwork:
             for _ in range(5000):
                 seg = np.random.randint(self.n_segments)
                 vb  = np.random.randint(100)
-                visited_s.append([seg / self.n_segments, vb / 99.0])
+                raw = np.array([seg, vb * vbin_size])
+                visited_s.append(self._norm(raw).tolist())
                 visited_q.append(self.q[seg, vb, :])
 
         S = np.array(visited_s, dtype=np.float64)
         Q = np.array(visited_q, dtype=np.float64)
 
-        # Scale Q-values to reasonable range for linear output
-        qmin, qmax = Q.min(), Q.max()
-        qrange = max(qmax - qmin, 1e-6)
-        Qn = (Q - qmin) / qrange * 4.0 - 2.0   # Map to [-2, 2]
+        # Scale Q-values to match the reward scaling used in the replay buffer
+        # (rewards stored as reward * 0.01 — see _phase1 _store and _energy_reward).
+        # This keeps Bellman targets consistent with the distilled outputs.
+        Qn = Q * 0.01
 
         n_batches = 5000
         best_agr = 0
@@ -502,6 +507,10 @@ class DeepQNetwork:
                     n_upd += 1
 
                 steps += 1
+
+                # Bail out early if the train has stalled (matches Phase 1 guard)
+                if self.env.v < 0.1 and steps > 100:
+                    break
 
             # Track delta for CM
             delta = np.sum(np.abs(self.q - self.q_prev))
