@@ -1,9 +1,9 @@
 """
-PPO trainer (Tianshou) for the train speed-profile problem — improved.
+PPO trainer (Tianshou) for the train speed-profile problem.
 
-What this does that train_ppo.py does not:
+This is the project's PPO implementation. Key features:
 
-  * Uses ppo.env_wrapper.PPOTrainEnv (rich obs + energy reward + tougher limits)
+  * Uses ppo.env_wrapper.PPOTrainEnv (rich 8-D obs + energy reward + tougher limits)
   * VectorEnvNormObs around the train + test envs (running obs mean/std);
     test envs share the train obs_rms but stop updating it.
   * InMemoryLogger captures train / test / update stats so we can save a
@@ -48,6 +48,10 @@ from env_settings.gym_env import load_data, require_gpu
 # Local
 from ppo.env_wrapper import PPOTrainEnv
 from ppo.plot import plot_speed_profile, plot_training_curves
+
+# Results live inside the ppo/ package (ppo/results/), anchored to this file so
+# the output path is independent of the working directory you launch from.
+PPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # ---------------------------------------------------------------------------
@@ -195,15 +199,14 @@ def main():
                    help='m/s overshoot above limit that ends the episode')
     p.add_argument('--seed',            type=int,   default=0)
     p.add_argument('--out-dir',         type=str,
-                   default=os.path.join(getattr(config, 'OUTPUT_DIR', 'results_cm'),
-                                        'ppo_v2'))
+                   default=os.path.join(PPO_DIR, 'results'))
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     print('=' * 72)
-    print('PPO v2 — rich obs, energy-aware reward, obs normalization, GPU only')
+    print('PPO — rich 8-D obs, energy-aware reward, obs normalization, GPU only')
     print('Physics: Davis equation (env_settings/physics.py — UNCHANGED)')
     print('=' * 72)
 
@@ -379,14 +382,14 @@ def main():
         os.path.join(out_dir, 'speed_profile.png'),
         segs, vels, acts, ens,
         np.asarray(grades), np.asarray(limits), station_segs,
-        title=f'PPO v2 — Energy={final_e:.0f} kWh '
+        title=f'PPO — Energy={final_e:.0f} kWh '
               f'({"COMPLETE" if success else "INCOMPLETE"})',
         dx=getattr(config, 'DX', 100.0),
     )
     print(f'   Profile -> {out_dir}/speed_profile.png')
 
     print('\n' + '=' * 72)
-    print('PPO v2 TRAINING COMPLETE')
+    print('PPO TRAINING COMPLETE')
     print('=' * 72)
 
 

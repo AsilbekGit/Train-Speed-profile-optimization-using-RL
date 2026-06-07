@@ -1,10 +1,10 @@
 """
 Self-contained PPO package.
 
-Goal: a stronger PPO baseline than train_ppo.py — rich observations, energy-aware
-reward, observation normalization, best-checkpoint saving, training-curve logging,
-richer speed-profile plot. Lives entirely under ppo/ and does not modify any
-existing code (env_settings/, train_ppo.py, train_dqn.py, etc.).
+The project's PPO implementation — rich 8-D observations, energy-aware reward,
+observation normalization, best-checkpoint saving, training-curve logging, and a
+richer speed-profile plot. Lives entirely under ppo/ (results in ppo/results/)
+and does not modify any shared code (env_settings/, train_dqn.py, etc.).
 
 Run from the project root:
     python -m ppo.train --steps 1500000

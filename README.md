@@ -23,27 +23,32 @@ for rolling/aerodynamic resistance, plus grade and curvature terms.
 │   ├── config.py               # masses, power, Davis coefficients, dt, dx, paths
 │   ├── physics.py              # Davis r_t(V) = C0 + C1·V + C2·V² + grade + curvature
 │   ├── environment.py          # TrainEnv: step physics + base reward (no energy term)
-│   └── gym_env.py              # Gymnasium adapter + load_data + require_gpu (used by DQN / PPO v1)
+│   └── gym_env.py              # Gymnasium adapter + load_data + require_gpu (used by DQN)
 │
 ├── qsarsa_dqn/
 │   └── qsarsa.py               # Tabular Q-SARSA with CM (convergence-monitor) switching
 │
-├── ppo/                        # ── new, improved PPO experiment ──
+├── ppo/                        # ── PPO experiment (self-contained) ──
 │   ├── env_wrapper.py          # PPOTrainEnv: 8-D obs, energy-aware reward, tougher limits
 │   ├── train.py                # Tianshou PPO + obs normalization + best-checkpoint + logger
-│   └── plot.py                 # Speed profile w/ grade band & limit overlay; training curves
+│   ├── plot.py                 # Speed profile w/ grade band & limit overlay; training curves
+│   └── results/                # PPO outputs land here (anchored to the package)
+│
+├── return_trip/                # ── same algorithms on the B → A return leg ──
+│   ├── route.py                # reverses segment order + flips grade signs
+│   ├── train_qsarsa.py         # return-leg Q-SARSA
+│   ├── train_dqn.py            # return-leg DQN
+│   └── train_ppo.py            # return-leg PPO (reuses ppo/ env + plots)
 │
 ├── train_qsarsa.py             # entrypoint — Q-SARSA
 ├── train_dqn.py                # entrypoint — Tianshou DQN (vanilla, target net, GPU only)
-├── train_ppo.py                # entrypoint — PPO v1 (raw obs, no energy reward; baseline)
 ├── main.py                     # Q-SARSA + CM analysis driver
 ├── cm_analyzer.py              # convergence-monitoring analysis on Q-SARSA Q-table
 │
-├── results_cm/                 # all outputs land here
+├── results_cm/                 # forward-trip outputs (except PPO, which lives in ppo/results/)
 │   ├── qsarsa/                 # Q-SARSA artifacts
 │   ├── dqn/                    # Tianshou DQN artifacts
-│   ├── ppo/                    # PPO v1 artifacts
-│   └── ppo_v2/                 # PPO v2 artifacts (from ppo/)
+│   └── return/                 # return-leg artifacts: qsarsa/, dqn/, ppo/
 │
 ├── requirements.txt
 └── README.md
@@ -55,11 +60,11 @@ for rolling/aerodynamic resistance, plus grade and curvature terms.
 |---|---|
 | `env_settings/physics.py` | Davis equation + traction-force model (untouched across all experiments) |
 | `env_settings/environment.py` | Step dynamics + base reward (progress, completion, soft limit penalty) |
-| `env_settings/gym_env.py` | Gymnasium wrapper used by DQN and PPO v1; identical 2-D obs `[seg_idx, v]` |
+| `env_settings/gym_env.py` | Gymnasium wrapper used by DQN; 2-D obs `[seg_idx, v]` |
 | `qsarsa_dqn/qsarsa.py` | Tabular CM-switching Q-SARSA from the paper |
 | `train_dqn.py` | Tianshou vanilla DQN with target net, ε-greedy, single env, **CUDA required** |
-| `train_ppo.py` | PPO v1 — Tianshou PPO on the bare 2-D obs; baseline that ignores energy |
-| `ppo/` | PPO v2 — rich obs, energy-aware reward, obs normalization, best-checkpoint, training curves |
+| `ppo/` | PPO — rich 8-D obs, energy-aware reward, obs normalization, best-checkpoint, training curves |
+| `return_trip/` | Re-runs Q-SARSA / DQN / PPO on the reversed route (B → A) |
 
 ---
 
@@ -111,19 +116,9 @@ Outputs land in `results_cm/dqn/`:
 - `dqn.pt` — final policy
 - `speed_profile.npz`, `speed_profile.png`
 
-### 3. PPO v1 — baseline (Tianshou, GPU required)
+### 3. PPO (`ppo/`, GPU required)
 
-PPO on the same 2-D obs as the original DQN. No energy reward. Useful as a
-reference point only.
-
-```bash
-python train_ppo.py --steps 2000000
-```
-Outputs land in `results_cm/ppo/`.
-
-### 4. PPO v2 — improved (`ppo/`, GPU required)
-
-This is the main PPO experiment. Rich 8-D observation (current/lookahead grade,
+The main PPO experiment. Rich 8-D observation (current/lookahead grade,
 current/lookahead speed limit, distance to next station), energy-aware reward
 shaping, observation normalization, best-checkpoint saving, training-curve PNG.
 
@@ -138,7 +133,7 @@ python -m ppo.train --steps 3000000
 python -m ppo.train --steps 8000
 
 # Custom output directory
-python -m ppo.train --steps 1500000 --out-dir results_cm/ppo_v2_run2
+python -m ppo.train --steps 1500000 --out-dir ppo/results_run2
 ```
 
 Useful tuning knobs:
@@ -149,7 +144,7 @@ Useful tuning knobs:
 - `--n-envs 8` — parallel envs for rollout collection.
 - `--clip 0.2 --gamma 0.99 --gae-lambda 0.95 --ent-coef 0.01 --vf-coef 0.5` — standard PPO knobs.
 
-Outputs (`results_cm/ppo_v2/`):
+Outputs (`ppo/results/`):
 - `ppo_best.pt` — checkpoint of the best test-return policy (loaded for the final rollout)
 - `ppo_last.pt` — checkpoint at end of training
 - `speed_profile.png` — 4-panel chart: speed + limit overlay, grade band, cumulative energy, action timeline (all sharing the X axis)
@@ -157,9 +152,24 @@ Outputs (`results_cm/ppo_v2/`):
 - `training_curves.png` — return / episode length / loss vs. env steps
 - `train.csv`, `test.csv`, `update.csv`, `info.csv` — all training stats in flat CSVs
 
+### 4. Return trip — B → A (reversed route)
+
+Re-runs the same algorithms on the return leg: `route.py` reverses segment
+order and **flips grade signs** (a forward uphill becomes a return downhill);
+speed limits and curvature are direction-agnostic. The algorithm code is
+unchanged — it just sees a different route.
+
+```bash
+python -m return_trip.train_qsarsa
+python -m return_trip.train_dqn   --steps 1500000
+python -m return_trip.train_ppo   --steps 1500000
+python -m return_trip.train_ppo   --steps 8000          # quick sanity
+```
+Outputs land in `results_cm/return/{qsarsa,dqn,ppo}/`.
+
 ---
 
-## Reading a `speed_profile.png` (PPO v2)
+## Reading a `speed_profile.png` (PPO)
 
 The four stacked panels share the X axis (position in km):
 
@@ -206,7 +216,7 @@ during Power cannot be recovered.
 ## GPU requirements
 
 - **Q-SARSA**: pure NumPy, CPU only. GPU does nothing useful here.
-- **DQN, PPO v1, PPO v2**: hard-require CUDA. The trainers abort with
+- **DQN, PPO**: hard-require CUDA. The trainers abort with
   `ERROR: CUDA is required` if no NVIDIA GPU is available.
 
 Tested on an NVIDIA GB10 (DGX Spark) with `torch 2.11.0+cu130`.

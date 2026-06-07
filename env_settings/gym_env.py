@@ -1,5 +1,6 @@
 """
-Gymnasium adapter and route loader shared by train_dqn.py / train_ppo.py.
+Gymnasium adapter and route loader shared by train_dqn.py and the PPO/return-trip
+trainers (load_data, require_gpu).
 
 The wrapper delegates every step to the existing TrainEnv
 (env_settings/environment.py), which calls
