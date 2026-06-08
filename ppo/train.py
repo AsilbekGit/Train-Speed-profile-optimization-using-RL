@@ -47,7 +47,7 @@ from env_settings.gym_env import load_data, require_gpu
 
 # Local
 from ppo.env_wrapper import PPOTrainEnv
-from ppo.plot import plot_speed_profile, plot_training_curves
+from ppo.plot import plot_training_curves, save_rollout_outputs
 
 # Results live inside the ppo/ package (ppo/results/), anchored to this file so
 # the output path is independent of the working directory you launch from.
@@ -191,12 +191,17 @@ def main():
     p.add_argument('--batch-size',      type=int,   default=256)
     p.add_argument('--n-update-epochs', type=int,   default=10)
     p.add_argument('--hidden',          type=int,   nargs='+', default=[256, 256])
+    # Forward and return MUST share these so the two legs are the same model and
+    # only the route differs (the energy/profile comparison would otherwise be
+    # confounded by reward shaping). Keep in sync with return_trip/train_ppo.py.
     p.add_argument('--energy-coef',     type=float, default=2.0,
                    help='reward penalty per kWh of step energy')
-    p.add_argument('--limit-pen',       type=float, default=2.0,
+    p.add_argument('--limit-pen',       type=float, default=4.0,
                    help='reward penalty per m/s of speed-limit overshoot')
-    p.add_argument('--limit-term',      type=float, default=5.0,
-                   help='m/s overshoot above limit that ends the episode')
+    p.add_argument('--limit-term',      type=float, default=-1.0,
+                   help='m/s overshoot that ends the episode; <=0 disables termination')
+    p.add_argument('--jerk-pen',        type=float, default=0.0,
+                   help='optional penalty per unit of |action change| (0 = off)')
     p.add_argument('--seed',            type=int,   default=0)
     p.add_argument('--out-dir',         type=str,
                    default=os.path.join(PPO_DIR, 'results'))
@@ -206,7 +211,7 @@ def main():
     np.random.seed(args.seed)
 
     print('=' * 72)
-    print('PPO — rich 8-D obs, energy-aware reward, obs normalization, GPU only')
+    print('PPO — rich 9-D obs, energy-aware reward, obs normalization, GPU only')
     print('Physics: Davis equation (env_settings/physics.py — UNCHANGED)')
     print('=' * 72)
 
@@ -217,18 +222,23 @@ def main():
     grades, limits, curves = load_data()
     print(f'   {len(grades)} segments, {len(grades) * 0.1:.1f} km')
 
+    # <=0 disables the hard limit-overshoot termination (env wants None). Same
+    # convention and default as return_trip/train_ppo.py so both legs match.
+    limit_term = None if args.limit_term <= 0 else args.limit_term
     print('\n2. Building envs (rich obs + energy reward)...')
+    print(f'   energy_coef={args.energy_coef}, limit_pen={args.limit_pen}, '
+          f'limit_term={"DISABLED" if limit_term is None else f"{limit_term} m/s"}, '
+          f'jerk_pen={args.jerk_pen}')
     def make_env():
         return PPOTrainEnv(
             grades, limits, curves,
             energy_coef=args.energy_coef,
             limit_pen_coef=args.limit_pen,
-            limit_overshoot_term=args.limit_term,
+            limit_overshoot_term=limit_term,
+            jerk_pen_coef=args.jerk_pen,
         )
     sample_env = make_env()
     print(f'   obs dim = {sample_env.OBS_DIM}, action dim = {sample_env.action_space.n}')
-    print(f'   energy_coef={args.energy_coef}, limit_pen={args.limit_pen}, '
-          f'limit_term={args.limit_term} m/s')
 
     train_envs_raw = DummyVectorEnv([make_env for _ in range(args.n_envs)])
     test_envs_raw  = DummyVectorEnv([make_env for _ in range(args.n_test_envs)])
@@ -360,10 +370,6 @@ def main():
     eval_env = _NormalizedSingleEnv(eval_env_raw, rms)
     segs, vels, acts, ens = greedy_rollout(actor, eval_env, device)
 
-    np.savez(os.path.join(out_dir, 'speed_profile.npz'),
-             segments=np.array(segs), velocities=np.array(vels),
-             actions=np.array(acts), energies=np.array(ens))
-
     final_seg = segs[-1] if segs else 0
     success = final_seg >= eval_env.n_segments - 2
     final_e = ens[-1] if ens else 0.0
@@ -376,17 +382,17 @@ def main():
     for i, nm in enumerate(['Brake', 'Coast', 'Cruise', 'Power']):
         print(f'   {nm:6s}: {(aa == i).mean() * 100:.1f}%')
 
-    # Speed profile plot
-    station_segs = np.where(np.asarray(limits) <= 1.0)[0]
-    plot_speed_profile(
-        os.path.join(out_dir, 'speed_profile.png'),
-        segs, vels, acts, ens,
-        np.asarray(grades), np.asarray(limits), station_segs,
+    # All rollout artifacts (npz, per-timestep speed_log.csv, speed_profile.png
+    # vs distance, speed_vs_time.png vs time) from one shared helper.
+    save_rollout_outputs(
+        out_dir, segs, vels, acts, ens, grades, limits,
         title=f'PPO — Energy={final_e:.0f} kWh '
               f'({"COMPLETE" if success else "INCOMPLETE"})',
         dx=getattr(config, 'DX', 100.0),
+        dt=getattr(config, 'DT', 1.0),
     )
-    print(f'   Profile -> {out_dir}/speed_profile.png')
+    print(f'   Outputs -> {out_dir}/ '
+          f'(speed_profile.png, speed_vs_time.png, speed_log.csv)')
 
     print('\n' + '=' * 72)
     print('PPO TRAINING COMPLETE')
