@@ -220,6 +220,12 @@ class PPOTrainEnv(gym.Env):
         #   - add proportional limit-overshoot penalty (linear from first m/s)
         energy_pen = -self.energy_coef * e_step
         limit_pen = -self.limit_pen_coef * overshoot
+        # Station stall-trap relief: the base env charges -10/step whenever v < 1.0,
+        # which punishes slowing to a near-stop AT a station. Cancel it when the
+        # train is legitimately crawling through a station, so braking for a station
+        # doesn't bleed reward. (Removing this drifted the forward policy into a much
+        # more limit-violating optimum — see DEVELOPMENT_LOG.md §7f, hence reverted.)
+        station_relief = 10.0 if (is_station and v_after < 1.0) else 0.0
 
         # Optional gentler-driving shaping (off by default):
         #   - cancel the base env's flat +0.1 'v>5' speed bonus so the policy is
@@ -235,7 +241,7 @@ class PPOTrainEnv(gym.Env):
             jerk_pen = 0.0
         self._prev_action = action
 
-        reward = (float(base_reward) + energy_pen + limit_pen
+        reward = (float(base_reward) + energy_pen + limit_pen + station_relief
                   + speed_bonus_cancel + jerk_pen)
 
         self._steps += 1
